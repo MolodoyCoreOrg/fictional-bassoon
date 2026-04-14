@@ -1,0 +1,15 @@
+[Unit]
+Description=GG_Loader Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/music_bot
+Environment="PATH=/var/www/music_bot/venv/bin"
+ExecStart=/var/www/music_bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
