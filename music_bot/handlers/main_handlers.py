@@ -151,12 +151,18 @@ async def handle_track_info(message: Message):
         # Добавляем обложку и метаданные к MP3
         processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
         
-        # Отправляем обработанный файл как аудио с метаданными
+        # Отправляем обработанный файл как аудио с метаданными и обложкой
+        from aiogram.types import FSInputFile
+        
+        audio_file = FSInputFile(processed_path)
+        
         await message.answer_audio(
-            FSInputFile(processed_path),
+            audio=audio_file,
             title=title,
             performer=artist,
-            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_"
+            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_",
+            parse_mode="Markdown",
+            thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
         )
         
         await message.answer("✅ Готово! Ваш трек обработан и готов к отправке.\n\nБот применил обложку и метаданные к файлу.")
@@ -204,12 +210,20 @@ async def process_download_link(message: Message):
         else:
             processed_path = audio_path
         
-        # Отправляем готовый файл
+        # Отправляем готовый файл с обложкой как миниатюрой
+        from aiogram.types import FSInputFile
+        
+        # Создаем InputFile для отправки
+        audio_file = FSInputFile(processed_path)
+        
+        # Отправляем аудио с метаданными и обложкой
         await message.answer_audio(
-            FSInputFile(processed_path),
+            audio=audio_file,
             title=title,
             performer=artist,
-            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_"
+            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_",
+            parse_mode="Markdown",
+            thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
         )
         
         await message.answer("✅ Готово! Ваш трек обработан и готов к отправке.\n\nБот применил обложку и метаданные к файлу.")
