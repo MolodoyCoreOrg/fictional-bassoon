@@ -7,6 +7,10 @@ import os
 import uuid
 import tempfile
 import aiohttp
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -32,7 +36,13 @@ async def inline_search(inline_query: InlineQuery):
         ]
     else:
         # Ищем музыку (показываем до 10 результатов для пагинации)
-        search_results = await search_music(query, limit=10)
+        logger.info(f"Inline search query: {query}")
+        try:
+            search_results = await search_music(query, limit=10)
+            logger.info(f"Found {len(search_results)} results for query: {query}")
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            search_results = []
         
         results = []
         for idx, track in enumerate(search_results[:10]):  # Максимум 10 результатов
@@ -159,13 +169,20 @@ async def process_inline_download(callback: CallbackQuery):
         else:
             processed_path = audio_path
         
-        # Отправляем готовый файл
+        # Отправляем готовый файл с обложкой как миниатюрой
         from aiogram.types import FSInputFile
+        
+        # Создаем InputFile для отправки
+        audio_file = FSInputFile(processed_path)
+        
+        # Отправляем аудио с метаданными
         await callback.message.answer_audio(
-            FSInputFile(processed_path),
+            audio=audio_file,
             title=title,
             performer=artist,
-            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_"
+            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_",
+            parse_mode="Markdown",
+            thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
         )
         
         await callback.message.answer("✅ Трек успешно загружен с обложкой и метаданными!")

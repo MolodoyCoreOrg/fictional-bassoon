@@ -1,6 +1,10 @@
 import aiohttp
 import yt_dlp
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def download_from_url(url: str, temp_dir: str) -> dict:
     """
@@ -30,6 +34,8 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             }],
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
+            'quiet': True,
+            'no_warnings': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -49,6 +55,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             result['success'] = True
             
     except Exception as e:
+        logger.error(f"Download error: {e}")
         result['error'] = str(e)
     
     return result
@@ -67,26 +74,38 @@ async def search_music(query: str, limit: int = 5) -> list:
     try:
         ydl_opts = {
             'format': 'bestaudio/best',
-            'extract_flat': True,
+            'extract_flat': 'in_playlist',  # Изменено для получения thumbnail
             'default_search': 'ytsearch',
+            'quiet': True,
+            'no_warnings': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_query = f"ytsearch{limit}:{query}"
+            logger.info(f"Searching: {search_query}")
             info = ydl.extract_info(search_query, download=False)
             
             if info and 'entries' in info:
                 for entry in info['entries']:
                     if entry:
+                        # Получаем thumbnail из разных источников
+                        thumbnail = entry.get('thumbnail')
+                        if not thumbnail and entry.get('thumbnails'):
+                            # Берем лучшую миниатюру из списка
+                            thumbnails = entry.get('thumbnails', [])
+                            if thumbnails:
+                                thumbnail = thumbnails[-1].get('url')  # Последняя обычно лучшего качества
+                        
                         results.append({
                             'title': entry.get('title', 'Неизвестно'),
                             'artist': entry.get('uploader', 'Неизвестно'),
                             'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
                             'duration': entry.get('duration'),
-                            'thumbnail': entry.get('thumbnail')
+                            'thumbnail': thumbnail
                         })
+                logger.info(f"Found {len(results)} results")
                         
     except Exception as e:
-        print(f"Search error: {e}")
+        logger.error(f"Search error: {e}")
     
     return results
