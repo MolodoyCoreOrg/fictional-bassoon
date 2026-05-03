@@ -61,6 +61,12 @@ async def inline_search(inline_query: InlineQuery):
             # Кодируем данные для отправки в callback
             track_data = f"{track['title']}|{track['artist']}|{track['url']}|{track.get('thumbnail', '')}"
             
+            # Определяем иконку источника
+            source_icon = {
+                'vk': '🔵',
+                'soundcloud': '🟠'
+            }.get(track.get('source', ''), '🎵')
+            
             # Создаем клавиатуру с кнопкой для скачивания
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"download_track:{track_data}")]
@@ -69,8 +75,8 @@ async def inline_search(inline_query: InlineQuery):
             results.append(
                 InlineQueryResultArticle(
                     id=result_id,
-                    title=f"🎵 {track['title']}",
-                    description=f"👤 {track['artist']} | ⏱ {duration_str}",
+                    title=f"{source_icon} {track['title']}",
+                    description=f"👤 {track['artist']} | ⏱ {duration_str} | {track.get('source', 'Unknown').upper()}",
                     input_message_content=InputTextMessageContent(
                         message_text=f"🎵 **{track['title']}**\n"
                                    f"👤 Исполнитель: {track['artist']}\n"
