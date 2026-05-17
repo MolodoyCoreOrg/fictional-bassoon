@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from utils.music_downloader import search_music, download_from_url
-from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from music_bot.utils.music_downloader import search_music, download_from_url
+from music_bot.utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 import hashlib
 import os
 import uuid
