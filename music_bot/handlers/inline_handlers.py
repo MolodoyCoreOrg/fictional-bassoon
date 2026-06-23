@@ -8,6 +8,7 @@ import uuid
 import tempfile
 import aiohttp
 import logging
+import html
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -181,13 +182,19 @@ async def process_inline_download(callback: CallbackQuery):
         # Создаем InputFile для отправки
         audio_file = FSInputFile(processed_path)
         
+        caption = (
+            f"🎵 {html.escape(title)}\n"
+            f"👤 {html.escape(artist)}\n"
+            f"Скачано с помощью @GG_Loader_bot"
+        )
+        
         # Отправляем аудио с метаданными
         await callback.message.answer_audio(
             audio=audio_file,
             title=title,
             performer=artist,
-            caption=f"🎵 {title}\n👤 {artist}\n\n_Скачано с помощью @GG_Loader_bot_",
-            parse_mode="Markdown",
+            caption=caption,
+            parse_mode="HTML",
             thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
         )
         
