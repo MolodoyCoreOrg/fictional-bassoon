@@ -1,6 +1,8 @@
 import os
 import uuid
 import logging
+import html
+import re
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, FSInputFile
@@ -87,7 +89,7 @@ async def handle_video_link(message: Message, state: FSMContext):
     
     platform = detect_platform(url) or "Неизвестно"
     info_text = (
-        f"🎬 <b>Название:</b> {formats_result['title']}\n"
+        f"🎬 <b>Название:</b> {html.escape(formats_result['title'])}\n"
         f"📺 <b>Платформа:</b> {platform}\n\n"
         f"Выберите качество для скачивания:"
     )
@@ -112,9 +114,26 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         result = await download_video(video_url, user_temp_dir, format_id)
         if result['success']:
             video_file = FSInputFile(result['video_path'])
+            
+            # Формируем хэштег (убираем все кроме букв, цифр и _)
+            author_str = result.get('author', 'Неизвестно')
+            author_hashtag = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9_]', '', author_str)
+            if not author_hashtag:
+                author_hashtag = "Неизвестно"
+                
+            caption = (
+                f"🍿 {html.escape(result['title'])}\n"
+                f"🔗 {html.escape(result.get('url', video_url))}\n\n"
+                f"🗣 Автор: #{html.escape(author_hashtag)}\n"
+                f"📅 Дата: {html.escape(result.get('upload_date', 'Неизвестно'))}\n"
+                f"⏱️ Продолжительность: {html.escape(result.get('duration_str', 'Неизвестно'))}\n"
+                f"🎥 {html.escape(result.get('quality', 'Неизвестно'))}\n\n"
+                f"Скачано с помощью @GG_Loader_bot"
+            )
+            
             await callback.message.answer_video(
                 video=video_file,
-                caption=f"🎬 <b>{result['title']}</b>\n\n<i>Скачано через @GG_Loader_bot</i>",
+                caption=caption,
                 parse_mode="HTML"
             )
             await callback.message.delete()
@@ -164,9 +183,15 @@ async def handle_audio_link(message: Message, state: FSMContext):
             audio_file = FSInputFile(processed_path)
             thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
             
+            caption = (
+                f"🎵 {html.escape(title)}\n"
+                f"👤 {html.escape(artist)}\n"
+                f"Скачано с помощью @GG_Loader_bot"
+            )
+            
             await message.answer_audio(
                 audio=audio_file, title=title, performer=artist,
-                caption=f"🎵 <b>{title}</b>\n👤 {artist}\n\n<i>Скачано через @GG_Loader_bot</i>",
+                caption=caption,
                 parse_mode="HTML", thumb=thumb_file
             )
             await msg.delete()
@@ -207,9 +232,16 @@ async def handle_extract_link(message: Message, state: FSMContext):
                 processed_path = audio_path
                 
             audio_file = FSInputFile(processed_path)
+            
+            caption = (
+                f"🎵 {html.escape(result['title'])}\n"
+                f"👤 {html.escape(result['artist'])}\n"
+                f"Скачано с помощью @GG_Loader_bot"
+            )
+            
             await message.answer_audio(
                 audio=audio_file, title=result['title'], performer=result['artist'],
-                caption="✅ Аудио успешно извлечено!\n\n<i>Скачано через @GG_Loader_bot</i>",
+                caption=caption,
                 parse_mode="HTML"
             )
             await msg.delete()
@@ -280,9 +312,15 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
         audio_file = FSInputFile(processed_path)
         thumb_file = FSInputFile(cover_path) if os.path.exists(cover_path) else None
         
+        caption = (
+            f"🎵 {html.escape(title)}\n"
+            f"👤 {html.escape(artist)}\n"
+            f"Скачано с помощью @GG_Loader_bot"
+        )
+        
         await message.answer_audio(
             audio=audio_file, title=title, performer=artist,
-            caption=f"🎵 <b>{title}</b>\n👤 {artist}\n\n<i>Сделано в @GG_Loader_bot</i>",
+            caption=caption,
             parse_mode="HTML", thumb=thumb_file
         )
         await msg.delete()
