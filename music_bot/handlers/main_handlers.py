@@ -55,9 +55,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "about_guchi")
 async def about_guchi(callback: CallbackQuery):
     await callback.message.edit_text(
-        "ℹ️ <b>О ГУЧИГЕНГОВО!</b>\n\n"
-        "ГУЧИГЕНГОВО — это музыкальное объединение, создающее уникальный контент.\n"
-        "Следите за нами в социальных сетях и слушайте нашу музыку!",
+        "<b>Шуточное объединение из России, положившее своё начало 3 ноября 2024 года</b>",
         reply_markup=get_about_guchi_keyboard(),
         parse_mode="HTML"
     )
