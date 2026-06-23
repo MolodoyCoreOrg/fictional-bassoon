@@ -9,6 +9,7 @@ import tempfile
 import aiohttp
 import logging
 import html
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -182,9 +183,12 @@ async def process_inline_download(callback: CallbackQuery):
         # Создаем InputFile для отправки
         audio_file = FSInputFile(processed_path)
         
+        # Обновленный шаблон подписи
+        current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
             f"🎵 {html.escape(title)}\n"
             f"👤 {html.escape(artist)}\n"
+            f"📅 {current_date}\n"
             f"Скачано с помощью @GG_Loader_bot"
         )
         
