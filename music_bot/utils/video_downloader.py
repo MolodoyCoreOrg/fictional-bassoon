@@ -21,6 +21,21 @@ SUPPORTED_PLATFORMS = [
     'facebook'
 ]
 
+def format_date(date_str: str) -> str:
+    """Форматирует дату из YYYYMMDD в DD.MM.YYYY"""
+    if not date_str or len(date_str) != 8:
+        return "Неизвестно"
+    return f"{date_str[6:8]}.{date_str[4:6]}.{date_str[0:4]}"
+
+def format_duration(seconds: int) -> str:
+    """Форматирует секунды в H:MM:SS или M:SS"""
+    if not seconds:
+        return "0:00"
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 def get_video_formats(url: str) -> Dict:
     """
@@ -144,7 +159,7 @@ def get_video_formats(url: str) -> Dict:
 
 async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     """
-    Скачивает видео в указанном качестве
+    Скачивает видео в указанном качестве и извлекает дополнительные данные
     
     :param url: Ссылка на видео
     :param temp_dir: Директория для сохранения
@@ -157,7 +172,12 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
         'title': None,
         'thumbnail_path': None,
         'filesize': 0,
-        'error': None
+        'error': None,
+        'author': None,
+        'upload_date': None,
+        'duration_str': None,
+        'quality': None,
+        'url': None
     }
     
     try:
@@ -176,6 +196,24 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             
             result['title'] = info.get('title', 'Неизвестно')
             result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
+            
+            # Дополнительные поля для красивого Caption
+            result['author'] = info.get('uploader', 'Неизвестно')
+            raw_date = info.get('upload_date')
+            result['upload_date'] = format_date(raw_date) if raw_date else "Неизвестно"
+            
+            duration = info.get('duration', 0)
+            result['duration_str'] = format_duration(duration)
+            
+            # Пытаемся определить итоговое качество видео по загруженному или запрошенному
+            height = info.get('height')
+            if not height:
+                for f in info.get('requested_formats', []):
+                    if f.get('vcodec') and f.get('vcodec') != 'none':
+                        height = f.get('height')
+                        break
+            result['quality'] = f"{height}p" if height else "Неизвестно"
+            result['url'] = info.get('webpage_url') or url
             
             # Ищем скачанный файл
             video_id = info.get('id')
