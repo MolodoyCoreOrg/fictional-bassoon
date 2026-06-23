@@ -6,7 +6,8 @@ class MediaStates(StatesGroup):
     waiting_for_audio_link = State()
     waiting_for_extract_link = State()
     
-    # Состояния для наложения обложки (полностью переписано на FSM)
+    # Состояния для наложения обложки
     waiting_for_audio_file = State()
     waiting_for_cover = State()
     waiting_for_track_info = State()
+    waiting_for_channel_link = State()  # Новое состояние для ссылки на канал
