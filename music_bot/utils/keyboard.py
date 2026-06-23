@@ -24,7 +24,10 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
 
 def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
     buttons = [
-        [create_button("🎵 BandLink", url="https://band.link/guchigengovo")],
+        [create_button("🔗 наши соц. сети", url="https://band.link/guchigengovo")],
+        [create_button("🍒 СИСЬКИ", url="https://t.me/CuCbKu_gg_bot")],
+        [create_button("📢 Основной канал ГУЧИГЕНГОВО", url="https://t.me/guchigengovo")],
+        [create_button("👥 Участники Гучигенгово", url="https://t.me/guchigengovo/70")],
         [create_button("🔙 Назад в меню", callback_data="back_to_menu")]
     ]
     return create_keyboard(buttons)
