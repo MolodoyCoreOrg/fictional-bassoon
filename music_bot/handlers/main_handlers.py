@@ -3,9 +3,10 @@ import uuid
 import logging
 import html
 import re
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
@@ -181,9 +182,12 @@ async def handle_audio_link(message: Message, state: FSMContext):
             audio_file = FSInputFile(processed_path)
             thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
             
+            # Обновленный шаблон подписи
+            current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
                 f"🎵 {html.escape(title)}\n"
                 f"👤 {html.escape(artist)}\n"
+                f"📅 {current_date}\n"
                 f"Скачано с помощью @GG_Loader_bot"
             )
             
@@ -231,9 +235,12 @@ async def handle_extract_link(message: Message, state: FSMContext):
                 
             audio_file = FSInputFile(processed_path)
             
+            # Обновленный шаблон подписи
+            current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
                 f"🎵 {html.escape(result['title'])}\n"
                 f"👤 {html.escape(result['artist'])}\n"
+                f"📅 {current_date}\n"
                 f"Скачано с помощью @GG_Loader_bot"
             )
             
@@ -298,10 +305,40 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
     else:
         title, artist = text, "Неизвестно"
         
+    await state.update_data(title=title, artist=artist)
+    
+    # Кнопка для пропуска шага с каналом
+    skip_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Пропустить ⏭", callback_data="skip_channel_link")
+    ]])
+    
+    await message.answer(
+        "✅ Название и автор сохранены!\n\n"
+        "😉 <b>Опционально:</b> Отправьте ссылку на ваш канал (например, @guchigengovo), "
+        "чтобы она отображалась в сообщении с треком.\n"
+        "Если не хотите, нажмите кнопку «Пропустить»:",
+        reply_markup=skip_kb,
+        parse_mode="HTML"
+    )
+    await state.set_state(MediaStates.waiting_for_channel_link)
+
+@router.callback_query(MediaStates.waiting_for_channel_link, F.data == "skip_channel_link")
+async def skip_channel_link(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await process_final_audio(callback.message, state, channel_link=None)
+
+@router.message(MediaStates.waiting_for_channel_link, F.text)
+async def handle_custom_channel_link(message: Message, state: FSMContext):
+    channel_link = message.text.strip()
+    await process_final_audio(message, state, channel_link)
+
+async def process_final_audio(message: Message, state: FSMContext, channel_link: str = None):
     data = await state.get_data()
     audio_path = data.get('audio_path')
     cover_path = data.get('cover_path')
     user_temp_dir = data.get('temp_dir')
+    title = data.get('title')
+    artist = data.get('artist')
     
     msg = await message.answer("🛠 Свожу трек и обложку...")
     
@@ -310,9 +347,17 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
         audio_file = FSInputFile(processed_path)
         thumb_file = FSInputFile(cover_path) if os.path.exists(cover_path) else None
         
+        # Формируем итоговый caption с добавлением ссылки на канал при наличии
+        current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
             f"🎵 {html.escape(title)}\n"
             f"👤 {html.escape(artist)}\n"
+        )
+        if channel_link:
+            caption += f"😉 {html.escape(channel_link)}\n"
+            
+        caption += (
+            f"📅 {current_date}\n"
             f"Скачано с помощью @GG_Loader_bot"
         )
         
