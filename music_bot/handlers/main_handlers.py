@@ -10,15 +10,15 @@ from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMar
 from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
-from music_bot.models.states import MediaStates
-from music_bot.utils.config import TEMP_DIR
-from music_bot.utils.keyboard import (
+from models.states import MediaStates
+from utils.config import TEMP_DIR
+from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard
 )
-from music_bot.utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
-from music_bot.utils.music_downloader import download_from_url
-from music_bot.utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
+from utils.music_downloader import download_from_url
+from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 
 router = Router()
 logger = logging.getLogger(__name__)

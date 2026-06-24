@@ -47,3 +47,4 @@ temp/
 # Database
 *.db
 *.sqlite3
+venv2/
