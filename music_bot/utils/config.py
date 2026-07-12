@@ -16,6 +16,14 @@ TEMP_DIR = os.path.join(os.path.dirname(__file__), "..", "temp")
 # Ссылка на ГУЧИГЕНГОВО
 GUCHI_LINK = "https://band.link/guchigengovo"
 
+# Путь к файлу cookies.txt для обхода блокировки YouTube ("Sign in to confirm you’re not a bot")
+COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(os.path.dirname(__file__), "..", "cookies.txt"))
+if not os.path.exists(COOKIES_FILE):
+    if os.path.exists("cookies.txt"):
+        COOKIES_FILE = "cookies.txt"
+    else:
+        COOKIES_FILE = None
+
 def get_ffmpeg_location():
     """
     Автоматический поиск пути к директории с исполняемыми файлами ffmpeg и ffprobe.
@@ -56,3 +64,27 @@ def get_ffmpeg_location():
 
 # Определяем путь к ffmpeg для yt-dlp
 FFMPEG_LOCATION = get_ffmpeg_location()
+
+def get_anti_block_opts():
+    """
+    Возвращает единый набор настроек для yt-dlp, помогающий обойти блокировки YouTube 
+    и других сервисов (ошибка Sign in to confirm you’re not a bot).
+    Автоматически подключает cookies.txt, если файл существует.
+    """
+    opts = {
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'tv', 'web'],
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        },
+        'nocheckcertificate': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+    return opts

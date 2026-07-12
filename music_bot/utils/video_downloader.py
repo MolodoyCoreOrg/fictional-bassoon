@@ -4,7 +4,7 @@ import re
 import aiohttp
 import logging
 from typing import List, Dict, Optional
-from utils.config import FFMPEG_LOCATION
+from utils.config import FFMPEG_LOCATION, get_anti_block_opts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,21 +23,6 @@ SUPPORTED_PLATFORMS = [
     'twitter',
     'facebook'
 ]
-
-# Общие настройки для обхода блокировок YouTube и других сервисов
-ANTI_BLOCK_OPTS = {
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios', 'web'],
-        }
-    },
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    },
-    'nocheckcertificate': True,
-    'quiet': True,
-    'no_warnings': True,
-}
 
 def format_date(date_str: str) -> str:
     """Форматирует дату из YYYYMMDD в DD.MM.YYYY"""
@@ -70,7 +55,7 @@ def get_video_formats(url: str) -> Dict:
     
     try:
         ydl_opts = {
-            **ANTI_BLOCK_OPTS,
+            **get_anti_block_opts(),
             'extract_flat': False,
         }
         if FFMPEG_LOCATION:
@@ -183,7 +168,7 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     
     try:
         ydl_opts = {
-            **ANTI_BLOCK_OPTS,
+            **get_anti_block_opts(),
             'format': f'{format_id}+bestaudio[ext=m4a]/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'writethumbnail': True,
@@ -244,9 +229,11 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     return result
 
 
-async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
+async def download_audio_from_video(url: str, temp_dir: str, output_format: str = 'mp3') -> Dict:
     """
-    Извлекает аудио из видео
+    Извлекает аудио из видео с поддержкой выбора формата:
+    - 'mp3': обычный музыкальный файл
+    - 'voice': голосовое сообщение для Telegram (кодек OPUS в контейнере OGG)
     """
     result = {
         'success': False,
@@ -259,10 +246,24 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
     
     try:
         ydl_opts = {
-            **ANTI_BLOCK_OPTS,
+            **get_anti_block_opts(),
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [
+        }
+        if FFMPEG_LOCATION:
+            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+            
+        if output_format == 'voice':
+            # Для голосового сообщения в Telegram требуется кодек OPUS
+            ydl_opts['postprocessors'] = [
+                {
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'opus',
+                }
+            ]
+        else:
+            # Для стандартного MP3 файла
+            ydl_opts['postprocessors'] = [
                 {
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -272,11 +273,8 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
                     'key': 'FFmpegThumbnailsConvertor',
                     'format': 'jpg',
                 }
-            ],
-            'writethumbnail': True,
-        }
-        if FFMPEG_LOCATION:
-            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+            ]
+            ydl_opts['writethumbnail'] = True
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -310,42 +308,60 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
             
             audio_id = info.get('id', 'audio')
             
-            mp3_path = os.path.join(temp_dir, f"{audio_id}.mp3")
-            if os.path.exists(mp3_path):
-                result['audio_path'] = mp3_path
+            if output_format == 'voice':
+                valid_exts = ('.opus', '.ogg', '.m4a', '.mp3', '.wav')
             else:
+                valid_exts = ('.mp3',)
+            
+            for ext in valid_exts:
+                path = os.path.join(temp_dir, f"{audio_id}{ext}")
+                if os.path.exists(path):
+                    result['audio_path'] = path
+                    break
+            
+            if not result['audio_path']:
                 for file in os.listdir(temp_dir):
-                    if file.endswith('.mp3'):
+                    if file.lower().endswith(valid_exts) and not file.lower().endswith(('.jpg', '.png', '.webp', '.jpeg')):
                         result['audio_path'] = os.path.join(temp_dir, file)
                         break
 
-            jpg_path = os.path.join(temp_dir, f"{audio_id}.jpg")
-            if os.path.exists(jpg_path):
-                result['thumbnail_path'] = jpg_path
-            else:
-                for file in os.listdir(temp_dir):
-                    if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and not file.endswith('.mp3'):
-                        result['thumbnail_path'] = os.path.join(temp_dir, file)
-                        break
+            # Для голосовых сообщений переименовываем .opus в .ogg для 100% совместимости со всеми клиентами Telegram
+            if output_format == 'voice' and result['audio_path'] and result['audio_path'].endswith('.opus'):
+                ogg_path = result['audio_path'][:-5] + '.ogg'
+                try:
+                    os.rename(result['audio_path'], ogg_path)
+                    result['audio_path'] = ogg_path
+                except Exception as e:
+                    logger.warning(f"Не удалось переименовать .opus в .ogg: {e}")
 
-            if not result['thumbnail_path']:
-                thumb_url = info.get('thumbnail')
-                if not thumb_url and info.get('thumbnails'):
-                    thumbs = info.get('thumbnails', [])
-                    if thumbs:
-                        thumb_url = thumbs[-1].get('url')
-                
-                if thumb_url:
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(thumb_url) as resp:
-                                if resp.status == 200:
-                                    cover_path = os.path.join(temp_dir, "cover.jpg")
-                                    with open(cover_path, "wb") as f:
-                                        f.write(await resp.read())
-                                    result['thumbnail_path'] = cover_path
-                    except Exception as e:
-                        logger.warning(f"Не удалось скачать обложку: {e}")
+            if output_format == 'mp3':
+                jpg_path = os.path.join(temp_dir, f"{audio_id}.jpg")
+                if os.path.exists(jpg_path):
+                    result['thumbnail_path'] = jpg_path
+                else:
+                    for file in os.listdir(temp_dir):
+                        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and not file.endswith('.mp3'):
+                            result['thumbnail_path'] = os.path.join(temp_dir, file)
+                            break
+
+                if not result['thumbnail_path']:
+                    thumb_url = info.get('thumbnail')
+                    if not thumb_url and info.get('thumbnails'):
+                        thumbs = info.get('thumbnails', [])
+                        if thumbs:
+                            thumb_url = thumbs[-1].get('url')
+                    
+                    if thumb_url:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(thumb_url) as resp:
+                                    if resp.status == 200:
+                                        cover_path = os.path.join(temp_dir, "cover.jpg")
+                                        with open(cover_path, "wb") as f:
+                                            f.write(await resp.read())
+                                        result['thumbnail_path'] = cover_path
+                        except Exception as e:
+                            logger.warning(f"Не удалось скачать обложку: {e}")
 
             if result['audio_path'] and os.path.exists(result['audio_path']):
                 result['success'] = True

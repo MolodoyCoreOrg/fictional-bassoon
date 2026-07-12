@@ -60,3 +60,12 @@ def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKey
     buttons.append([create_button("❌ Отмена", callback_data="cancel_action")])
     
     return create_keyboard(buttons)
+
+def get_extract_format_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора формата при извлечении аудио из видео (MP3 или Voice)"""
+    buttons = [
+        [create_button("🎶 MP3 файл (с обложкой и тегами)", callback_data="ext_fmt_mp3")],
+        [create_button("🎙 Голосовое сообщение (Voice / OGG)", callback_data="ext_fmt_voice")],
+        [create_button("❌ Отмена", callback_data="cancel_action")]
+    ]
+    return create_keyboard(buttons)

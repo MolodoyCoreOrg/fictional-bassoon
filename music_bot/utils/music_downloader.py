@@ -3,7 +3,7 @@ import yt_dlp
 import os
 import re
 import logging
-from utils.config import FFMPEG_LOCATION
+from utils.config import FFMPEG_LOCATION, get_anti_block_opts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,21 +13,6 @@ SEARCH_SOURCES = [
     'soundcloud',
     'vk',
 ]
-
-# Антиблокировка
-ANTI_BLOCK_OPTS = {
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios', 'web'],
-        }
-    },
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    },
-    'nocheckcertificate': True,
-    'quiet': True,
-    'no_warnings': True,
-}
 
 
 async def download_from_url(url: str, temp_dir: str) -> dict:
@@ -46,7 +31,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     
     try:
         ydl_opts = {
-            **ANTI_BLOCK_OPTS,
+            **get_anti_block_opts(),
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'postprocessors': [
@@ -169,7 +154,7 @@ async def search_music(query: str, limit: int = 5) -> list:
             
         try:
             ydl_opts = {
-                **ANTI_BLOCK_OPTS,
+                **get_anti_block_opts(),
                 'format': 'bestaudio/best',
                 'extract_flat': 'in_playlist',
             }

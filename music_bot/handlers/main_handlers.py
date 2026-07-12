@@ -5,7 +5,7 @@ import html
 import re
 from datetime import datetime
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 
@@ -14,7 +14,8 @@ from models.states import MediaStates
 from utils.config import TEMP_DIR
 from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
-    get_about_guchi_keyboard, get_video_quality_keyboard
+    get_about_guchi_keyboard, get_video_quality_keyboard,
+    get_extract_format_keyboard
 )
 from utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
 from utils.music_downloader import download_from_url
@@ -22,6 +23,13 @@ from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+def extract_url(text: str) -> str:
+    """Извлекает первую ссылку из текста сообщения (на случай, если пользователь отправил текст вместе со ссылкой)"""
+    if not text:
+        return ""
+    match = re.search(r'https?://[^\s]+', text)
+    return match.group(0) if match else text.strip()
 
 # --- ОБЩИЕ КОМАНДЫ ---
 
@@ -72,9 +80,9 @@ async def process_download_video(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_video_link)
 
-@router.message(MediaStates.waiting_for_video_link, F.text.startswith("http"))
+@router.message(StateFilter(MediaStates.waiting_for_video_link), F.text.regexp(r'https?://[^\s]+'))
 async def handle_video_link(message: Message, state: FSMContext):
-    url = message.text.strip()
+    url = extract_url(message.text)
     msg = await message.answer("⏳ Анализирую ссылку и ищу доступные форматы...")
     
     formats_result = get_video_formats(url)
@@ -163,48 +171,17 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
         return
 
     await callback.answer()
-    status_msg = await callback.message.answer("🔊 Извлекаю аудиодорожку из видео...")
-    
-    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
-    os.makedirs(user_temp_dir, exist_ok=True)
-    
-    try:
-        result = await download_audio_from_video(video_url, user_temp_dir)
-        if result['success']:
-            audio_path = result['audio_path']
-            cover_path = result.get('thumbnail_path')
-            
-            if cover_path and os.path.exists(cover_path):
-                processed_path = await add_cover_to_mp3(audio_path, cover_path, result['title'], result['artist'])
-            else:
-                processed_path = audio_path
-                
-            audio_file = FSInputFile(processed_path)
-            thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
-            
-            current_date = datetime.now().strftime("%d/%m/%Y")
-            caption = (
-                f"🎵 {html.escape(result['title'])}\n"
-                f"👤 {html.escape(result['artist'])}\n"
-                f"📅 {current_date}\n\n"
-                f"❤️ @GG_Loader_bot"
-            )
-            
-            await callback.message.answer_audio(
-                audio=audio_file, title=result['title'], performer=result['artist'],
-                caption=caption,
-                parse_mode="HTML", thumb=thumb_file
-            )
-            await status_msg.delete()
-            try:
-                await callback.message.delete()
-            except:
-                pass
-        else:
-            await status_msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
-    finally:
-        await cleanup_temp_files(user_temp_dir)
-        await state.clear()
+    # Переводим в меню выбора формата (MP3 или Voice)
+    await state.update_data(extract_url=video_url)
+    await callback.message.edit_text(
+        f"🍿 Видео: <code>{html.escape(video_url)}</code>\n\n"
+        "🎵 <b>В каком формате вы хотите получить аудиодорожку?</b>\n\n"
+        "• <b>MP3</b> — музыкальный трек с обложкой и тегами.\n"
+        "• <b>Голосовое сообщение</b> — аудиосообщение для быстрой прослушки и пересылки.",
+        reply_markup=get_extract_format_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(MediaStates.waiting_for_extract_format)
 
 
 # --- 2. СКАЧИВАНИЕ АУДИО ПО ССЫЛКЕ ---
@@ -217,10 +194,10 @@ async def process_download_audio(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_audio_link)
 
-@router.message(MediaStates.waiting_for_audio_link, F.text.startswith("http"))
-@router.message(F.text.regexp(r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music|video)|vk\.ru/(audio|music|video)|music\.yandex\.(ru|com)|music\.youtube\.com|spotify\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com).*'))
+@router.message(StateFilter(MediaStates.waiting_for_audio_link), F.text.regexp(r'https?://[^\s]+'))
+@router.message(StateFilter(None, MediaStates.waiting_for_audio_link), F.text.regexp(r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music|video)|vk\.ru/(audio|music|video)|music\.yandex\.(ru|com)|music\.youtube\.com|spotify\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com).*'))
 async def handle_audio_link(message: Message, state: FSMContext):
-    url = message.text.strip()
+    url = extract_url(message.text)
     msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...")
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
@@ -266,54 +243,103 @@ async def handle_audio_link(message: Message, state: FSMContext):
         await state.clear()
 
 
-# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО ---
+# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (С ВЫБОРОМ ФОРМАТА) ---
 
 @router.callback_query(F.data == "extract_audio")
 async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🔊 <b>Извлечение аудио</b>\n\nОтправьте ссылку на видео, а я достану из него звук в формате MP3:",
+        "🔊 <b>Извлечение аудио</b>\n\nОтправьте ссылку на видео, а я достану из него звук:",
         reply_markup=get_back_keyboard(), parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_extract_link)
 
-@router.message(MediaStates.waiting_for_extract_link, F.text.startswith("http"))
+@router.message(StateFilter(MediaStates.waiting_for_extract_link), F.text.regexp(r'https?://[^\s]+'))
 async def handle_extract_link(message: Message, state: FSMContext):
-    url = message.text.strip()
-    msg = await message.answer("🔊 Извлекаю аудиодорожку из видео...")
+    url = extract_url(message.text)
+    await state.update_data(extract_url=url)
+    await message.answer(
+        f"🔗 Вижу ссылку: <code>{html.escape(url)}</code>\n\n"
+        "🎵 <b>В каком формате вы хотите получить аудиодорожку?</b>\n\n"
+        "• <b>MP3</b> — полноценный музыкальный файл с обложкой и тегами (удобно слушать в плеере).\n"
+        "• <b>Голосовое сообщение</b> — аудиосообщение в чате (удобно быстро переслать или послушать х2).",
+        reply_markup=get_extract_format_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(MediaStates.waiting_for_extract_format)
+
+@router.callback_query(StateFilter(MediaStates.waiting_for_extract_format, None), F.data.in_({"ext_fmt_mp3", "ext_fmt_voice"}))
+async def process_extract_format_selection(callback: CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    url = user_data.get("extract_url") or user_data.get("video_url")
+    
+    if not url:
+        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново.", show_alert=True)
+        await state.clear()
+        return
+
+    await callback.answer()
+    is_voice = (callback.data == "ext_fmt_voice")
+    fmt_name = "голосовое сообщение" if is_voice else "MP3 файл"
+    
+    status_msg = await callback.message.answer(f"⏳ Извлекаю аудио как {fmt_name}... Пожалуйста, подождите.")
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
     
     try:
-        result = await download_audio_from_video(url, user_temp_dir)
+        output_format = 'voice' if is_voice else 'mp3'
+        result = await download_audio_from_video(url, user_temp_dir, output_format=output_format)
+        
         if result['success']:
             audio_path = result['audio_path']
-            cover_path = result.get('thumbnail_path')
             
-            if cover_path and os.path.exists(cover_path):
-                processed_path = await add_cover_to_mp3(audio_path, cover_path, result['title'], result['artist'])
+            if is_voice:
+                # Отправляем как голосовое сообщение Telegram (Voice Note)
+                voice_file = FSInputFile(audio_path)
+                caption = (
+                    f"🎙 <b>{html.escape(result['title'])}</b>\n"
+                    f"👤 {html.escape(result['artist'])}\n\n"
+                    f"❤️ @GG_Loader_bot"
+                )
+                await callback.message.answer_voice(
+                    voice=voice_file,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
             else:
-                processed_path = audio_path
+                # Отправляем как полноценный MP3 трек с обложкой
+                cover_path = result.get('thumbnail_path')
+                if cover_path and os.path.exists(cover_path):
+                    processed_path = await add_cover_to_mp3(audio_path, cover_path, result['title'], result['artist'])
+                else:
+                    processed_path = audio_path
+                    
+                audio_file = FSInputFile(processed_path)
+                thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
                 
-            audio_file = FSInputFile(processed_path)
-            thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
+                current_date = datetime.now().strftime("%d/%m/%Y")
+                caption = (
+                    f"🎵 {html.escape(result['title'])}\n"
+                    f"👤 {html.escape(result['artist'])}\n"
+                    f"📅 {current_date}\n\n"
+                    f"❤️ @GG_Loader_bot"
+                )
+                await callback.message.answer_audio(
+                    audio=audio_file, title=result['title'], performer=result['artist'],
+                    caption=caption,
+                    parse_mode="HTML", thumb=thumb_file
+                )
             
-            current_date = datetime.now().strftime("%d/%m/%Y")
-            caption = (
-                f"🎵 {html.escape(result['title'])}\n"
-                f"👤 {html.escape(result['artist'])}\n"
-                f"📅 {current_date}\n\n"
-                f"❤️ @GG_Loader_bot"
-            )
-            
-            await message.answer_audio(
-                audio=audio_file, title=result['title'], performer=result['artist'],
-                caption=caption,
-                parse_mode="HTML", thumb=thumb_file
-            )
-            await msg.delete()
+            await status_msg.delete()
+            try:
+                await callback.message.delete()
+            except:
+                pass
         else:
-            await msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
+            await status_msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
+    except Exception as e:
+        logger.error(f"Error extracting audio format: {e}")
+        await status_msg.edit_text("❌ Произошла непредвиденная ошибка при обработке.")
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
@@ -329,7 +355,7 @@ async def process_upload_cover(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_audio_file)
 
-@router.message(MediaStates.waiting_for_audio_file, F.audio)
+@router.message(StateFilter(MediaStates.waiting_for_audio_file), F.audio)
 async def handle_custom_audio(message: Message, state: FSMContext):
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -342,7 +368,7 @@ async def handle_custom_audio(message: Message, state: FSMContext):
     await message.answer("✅ Аудио получено! Теперь отправьте картинку для обложки (желательно квадратную):")
     await state.set_state(MediaStates.waiting_for_cover)
 
-@router.message(MediaStates.waiting_for_cover, F.photo)
+@router.message(StateFilter(MediaStates.waiting_for_cover), F.photo)
 async def handle_custom_cover(message: Message, state: FSMContext):
     data = await state.get_data()
     user_temp_dir = data['temp_dir']
@@ -359,7 +385,7 @@ async def handle_custom_cover(message: Message, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_track_info)
 
-@router.message(MediaStates.waiting_for_track_info, F.text)
+@router.message(StateFilter(MediaStates.waiting_for_track_info), F.text)
 async def handle_custom_track_info(message: Message, state: FSMContext):
     text = message.text.strip()
     if " - " in text:
@@ -383,12 +409,12 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_channel_link)
 
-@router.callback_query(MediaStates.waiting_for_channel_link, F.data == "skip_channel_link")
+@router.callback_query(StateFilter(MediaStates.waiting_for_channel_link), F.data == "skip_channel_link")
 async def skip_channel_link(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await process_final_audio(callback.message, state, channel_link=None)
 
-@router.message(MediaStates.waiting_for_channel_link, F.text)
+@router.message(StateFilter(MediaStates.waiting_for_channel_link), F.text)
 async def handle_custom_channel_link(message: Message, state: FSMContext):
     channel_link = message.text.strip()
     await process_final_audio(message, state, channel_link)

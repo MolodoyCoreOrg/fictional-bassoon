@@ -5,6 +5,7 @@ class MediaStates(StatesGroup):
     waiting_for_video_link = State()
     waiting_for_audio_link = State()
     waiting_for_extract_link = State()
+    waiting_for_extract_format = State()  # Новое состояние для выбора формата (MP3 / Voice)
     
     # Состояния для наложения обложки
     waiting_for_audio_file = State()
