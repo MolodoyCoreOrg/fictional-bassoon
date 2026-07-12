@@ -2,7 +2,7 @@
 Модуль для управления главным меню бота
 (Устаревший модуль, используйте utils/keyboard.py)
 """
-from music_bot.utils.keyboard import (
+from utils.keyboard import (
     get_main_menu_keyboard,
     get_back_keyboard,
     get_about_guchi_keyboard,

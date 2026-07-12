@@ -1,9 +1,9 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from music_bot.handlers.main_handlers import router as main_router
-from music_bot.handlers.inline_handlers import router as inline_router
-from music_bot.utils.config import BOT_TOKEN, TEMP_DIR
+from handlers.main_handlers import router as main_router
+from handlers.inline_handlers import router as inline_router
+from utils.config import BOT_TOKEN, TEMP_DIR
 import logging
 import os
 
