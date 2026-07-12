@@ -21,6 +21,21 @@ SUPPORTED_PLATFORMS = [
     'facebook'
 ]
 
+# Общие настройки для обхода блокировок YouTube и других сервисов
+ANTI_BLOCK_OPTS = {
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios', 'web'],
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    },
+    'nocheckcertificate': True,
+    'quiet': True,
+    'no_warnings': True,
+}
+
 def format_date(date_str: str) -> str:
     """Форматирует дату из YYYYMMDD в DD.MM.YYYY"""
     if not date_str or len(date_str) != 8:
@@ -40,9 +55,6 @@ def format_duration(seconds: int) -> str:
 def get_video_formats(url: str) -> Dict:
     """
     Получает доступные форматы видео для указанной ссылки
-    
-    :param url: Ссылка на видео
-    :return: dict со списком форматов и информацией о видео
     """
     result = {
         'success': False,
@@ -55,8 +67,7 @@ def get_video_formats(url: str) -> Dict:
     
     try:
         ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
+            **ANTI_BLOCK_OPTS,
             'extract_flat': False,
         }
         
@@ -65,22 +76,23 @@ def get_video_formats(url: str) -> Dict:
             
             result['title'] = info.get('title', 'Неизвестно')
             result['duration'] = info.get('duration', 0)
-            result['thumbnail'] = info.get('thumbnail')
+            
+            # Получаем обложку наилучшего качества
+            thumbnail = info.get('thumbnail')
+            if not thumbnail and info.get('thumbnails'):
+                thumbnails = info.get('thumbnails', [])
+                if thumbnails:
+                    thumbnail = thumbnails[-1].get('url')
+            result['thumbnail'] = thumbnail
             
             formats_list = []
-            
-            # Получаем все форматы
+            seen_formats = set()
             formats = info.get('formats', [])
             
-            # Фильтруем только видео с аудиодорожкой или комбинируем
-            seen_formats = set()
-            
             for fmt in formats:
-                # Пропускаем форматы без видео
                 if not fmt.get('vcodec') or fmt.get('vcodec') == 'none':
                     continue
                 
-                # Получаем информацию о формате
                 format_id = fmt.get('format_id', '')
                 height = fmt.get('height', 0)
                 width = fmt.get('width', 0)
@@ -88,40 +100,33 @@ def get_video_formats(url: str) -> Dict:
                 filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
                 quality_name = fmt.get('format_note', '') or fmt.get('quality', '')
                 
-                # Определяем качество
                 if height >= 2160:
-                    quality_label = "4K (2160p)"
+                    quality_label = "4K"
                 elif height >= 1440:
-                    quality_label = "2K (1440p)"
+                    quality_label = "2K"
                 elif height >= 1080:
-                    quality_label = "Full HD (1080p)"
+                    quality_label = "1080p"
                 elif height >= 720:
-                    quality_label = "HD (720p)"
+                    quality_label = "720p"
                 elif height >= 480:
-                    quality_label = "SD (480p)"
+                    quality_label = "480p"
                 elif height >= 360:
                     quality_label = "360p"
                 else:
-                    quality_label = f"{height}p"
+                    quality_label = f"{height}p" if height else "SD"
                 
-                # Создаем уникальный ключ для избегания дубликатов
                 format_key = f"{height}_{ext}"
-                if format_key in seen_formats:
+                if format_key in seen_formats or not height:
                     continue
                 seen_formats.add(format_key)
                 
-                # Проверяем размер файла (если известен)
                 size_mb = filesize / (1024 * 1024) if filesize else None
                 too_large = size_mb and size_mb > MAX_FILE_SIZE_BYTES / (1024 * 1024)
                 
-                # Формируем отображаемый размер
                 if size_mb:
-                    if size_mb >= 1024:
-                        size_str = f"{size_mb/1024:.1f} ГБ"
-                    else:
-                        size_str = f"{size_mb:.1f} МБ"
+                    size_str = f"{size_mb/1024:.1f} ГБ" if size_mb >= 1024 else f"{size_mb:.1f} МБ"
                 else:
-                    size_str = "размер неизвестен"
+                    size_str = "⌛"
                 
                 formats_list.append({
                     'format_id': format_id,
@@ -137,13 +142,9 @@ def get_video_formats(url: str) -> Dict:
                     'format_note': quality_name
                 })
             
-            # Сортируем по качеству (от высокого к низкому)
             formats_list.sort(key=lambda x: x['height'], reverse=True)
-            
-            # Оставляем только те, что помещаются в лимит Telegram (или все, если размер неизвестен)
             filtered_formats = [f for f in formats_list if not f['too_large'] or f['filesize'] is None]
             
-            # Если все форматы отфильтровались, берем хотя бы один с наименьшим качеством
             if not filtered_formats and formats_list:
                 filtered_formats = [formats_list[-1]]
             
@@ -160,11 +161,6 @@ def get_video_formats(url: str) -> Dict:
 async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     """
     Скачивает видео в указанном качестве и извлекает дополнительные данные
-    
-    :param url: Ссылка на видео
-    :param temp_dir: Директория для сохранения
-    :param format_id: ID выбранного формата
-    :return: dict с путем к файлу и метаданными
     """
     result = {
         'success': False,
@@ -182,12 +178,11 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     
     try:
         ydl_opts = {
+            **ANTI_BLOCK_OPTS,
             'format': f'{format_id}+bestaudio[ext=m4a]/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
-            'quiet': True,
-            'no_warnings': True,
             'merge_output_format': 'mp4',
         }
         
@@ -196,8 +191,6 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             
             result['title'] = info.get('title', 'Неизвестно')
             result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
-            
-            # Дополнительные поля для красивого Caption
             result['author'] = info.get('uploader', 'Неизвестно')
             raw_date = info.get('upload_date')
             result['upload_date'] = format_date(raw_date) if raw_date else "Неизвестно"
@@ -205,17 +198,15 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             duration = info.get('duration', 0)
             result['duration_str'] = format_duration(duration)
             
-            # Пытаемся определить итоговое качество видео по загруженному или запрошенному
             height = info.get('height')
             if not height:
                 for f in info.get('requested_formats', []):
                     if f.get('vcodec') and f.get('vcodec') != 'none':
                         height = f.get('height')
                         break
-            result['quality'] = f"{height}p" if height else "Неизвестно"
+            result['quality'] = f"{height}p" if height else "MP4"
             result['url'] = info.get('webpage_url') or url
             
-            # Ищем скачанный файл
             video_id = info.get('id')
             possible_extensions = ['mp4', 'mkv', 'webm', 'avi']
             
@@ -226,7 +217,6 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
                     result['filesize'] = os.path.getsize(path)
                     break
             
-            # Если не нашли, пробуем найти любой видеофайл в директории
             if not result['video_path']:
                 for file in os.listdir(temp_dir):
                     if file.endswith(('.mp4', '.mkv', '.webm', '.avi')) and file != f"{video_id}.jpg":
@@ -246,10 +236,6 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
 async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
     """
     Извлекает аудио из видео
-    
-    :param url: Ссылка на видео
-    :param temp_dir: Директория для сохранения
-    :return: dict с путем к аудиофайлу и метаданными
     """
     result = {
         'success': False,
@@ -262,6 +248,7 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
     
     try:
         ydl_opts = {
+            **ANTI_BLOCK_OPTS,
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'postprocessors': [{
@@ -271,8 +258,6 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
             }],
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
-            'quiet': True,
-            'no_warnings': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -282,10 +267,8 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
             result['artist'] = info.get('uploader', 'Неизвестно')
             result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
             
-            # Путь к аудиофайлу
             audio_id = info.get('id')
             result['audio_path'] = os.path.join(temp_dir, f"{audio_id}.mp3")
-            
             result['success'] = True
             
     except Exception as e:
@@ -298,9 +281,6 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
 def detect_platform(url: str) -> Optional[str]:
     """
     Определяет платформу по URL
-    
-    :param url: Ссылка
-    :return: Название платформы или None
     """
     url_lower = url.lower()
     

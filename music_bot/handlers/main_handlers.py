@@ -10,15 +10,15 @@ from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMar
 from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
-from music_bot.models.states import MediaStates
-from music_bot.utils.config import TEMP_DIR
-from music_bot.utils.keyboard import (
+from models.states import MediaStates
+from utils.config import TEMP_DIR
+from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard
 )
-from music_bot.utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
-from music_bot.utils.music_downloader import download_from_url
-from music_bot.utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
+from utils.music_downloader import download_from_url
+from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ async def about_guchi(callback: CallbackQuery):
     )
 
 
-# --- 1. СКАЧИВАНИЕ ВИДЕО ---
+# --- 1. СКАЧИВАНИЕ ВИДЕО (с интерфейсом как на скриншотах) ---
 
 @router.callback_query(F.data == "download_video")
 async def process_download_video(callback: CallbackQuery, state: FSMContext):
@@ -86,14 +86,27 @@ async def handle_video_link(message: Message, state: FSMContext):
     await state.update_data(video_url=url)
     keyboard = get_video_quality_keyboard(url, formats_result['formats'], formats_result['title'])
     
-    platform = detect_platform(url) or "Неизвестно"
-    info_text = (
-        f"🎬 <b>Название:</b> {html.escape(formats_result['title'])}\n"
-        f"📺 <b>Платформа:</b> {platform}\n\n"
-        f"Выберите качество для скачивания:"
-    )
+    # Формируем текст подписи как на скриншоте 1
+    info_text = f"🍿 <b>{html.escape(formats_result['title'])}</b>"
+    
+    # Отправляем фото обложки с кнопками под ней (если обложка есть)
+    if formats_result.get('thumbnail'):
+        try:
+            await message.answer_photo(
+                photo=formats_result['thumbnail'],
+                caption=info_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            await msg.delete()
+            await state.set_state(None)
+            return
+        except Exception as e:
+            logger.warning(f"Не удалось отправить фото: {e}")
+            
+    # Если обложки нет или произошла ошибка отправки фото, шлем текстом
     await msg.edit_text(info_text, reply_markup=keyboard, parse_mode="HTML")
-    await state.set_state(None) # Ждем нажатия на кнопку
+    await state.set_state(None)
 
 @router.callback_query(F.data.startswith("viddl_"))
 async def download_selected_video(callback: CallbackQuery, state: FSMContext):
@@ -102,10 +115,13 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
     video_url = user_data.get("video_url")
     
     if not video_url:
-        await callback.answer("❌ Ошибка: ссылка потеряна.", show_alert=True)
+        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново.", show_alert=True)
         return
 
-    await callback.message.edit_text("⏳ Скачиваю видео... Пожалуйста, подождите.")
+    # Отвечаем, чтобы убрать часики на кнопке, и шлем статус
+    await callback.answer()
+    status_msg = await callback.message.answer("⏳ Загружаю видео... Пожалуйста, подождите.")
+    
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
     
@@ -114,20 +130,12 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         if result['success']:
             video_file = FSInputFile(result['video_path'])
             
-            # Формируем хэштег (убираем все кроме букв, цифр и _)
-            author_str = result.get('author', 'Неизвестно')
-            author_hashtag = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9_]', '', author_str)
-            if not author_hashtag:
-                author_hashtag = "Неизвестно"
-                
+            # Формируем подпись В ТОЧНОСТИ как на скриншоте 2
             caption = (
-                f"🍿 {html.escape(result['title'])}\n"
+                f"🍿 {html.escape(result['title'])}\n\n"
                 f"🔗 {html.escape(result.get('url', video_url))}\n\n"
-                f"🗣 Автор: #{html.escape(author_hashtag)}\n"
-                f"📅 Дата: {html.escape(result.get('upload_date', 'Неизвестно'))}\n"
-                f"⏱️ Продолжительность: {html.escape(result.get('duration_str', 'Неизвестно'))}\n"
-                f"🎥 {html.escape(result.get('quality', 'Неизвестно'))}\n\n"
-                f"Скачано с помощью @GG_Loader_bot"
+                f"🎥 {html.escape(result.get('quality', '1080p'))}\n\n"
+                f"❤️ @GG_Loader_bot"
             )
             
             await callback.message.answer_video(
@@ -135,12 +143,69 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                 caption=caption,
                 parse_mode="HTML"
             )
-            await callback.message.delete()
+            await status_msg.delete()
+            try:
+                await callback.message.delete()
+            except:
+                pass
         else:
-            await callback.message.edit_text(f"❌ Ошибка при скачивании: {result['error']}")
+            await status_msg.edit_text(f"❌ Ошибка при скачивании: {result['error']}")
     except Exception as e:
         logger.error(f"Error: {e}")
-        await callback.message.edit_text("❌ Произошла непредвиденная ошибка.")
+        await status_msg.edit_text("❌ Произошла непредвиденная ошибка при отправке.")
+    finally:
+        await cleanup_temp_files(user_temp_dir)
+        await state.clear()
+
+@router.callback_query(F.data == "vid_audio_extract")
+async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки «🎵 Audio» прямо из меню выбора разрешения видео"""
+    user_data = await state.get_data()
+    video_url = user_data.get("video_url")
+    
+    if not video_url:
+        await callback.answer("❌ Ошибка: ссылка потеряна.", show_alert=True)
+        return
+
+    await callback.answer()
+    status_msg = await callback.message.answer("🔊 Извлекаю аудиодорожку из видео...")
+    
+    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+    os.makedirs(user_temp_dir, exist_ok=True)
+    
+    try:
+        result = await download_audio_from_video(video_url, user_temp_dir)
+        if result['success']:
+            audio_path = result['audio_path']
+            cover_path = result.get('thumbnail_path')
+            
+            if cover_path and os.path.exists(cover_path):
+                processed_path = await add_cover_to_mp3(audio_path, cover_path, result['title'], result['artist'])
+            else:
+                processed_path = audio_path
+                
+            audio_file = FSInputFile(processed_path)
+            
+            current_date = datetime.now().strftime("%d/%m/%Y")
+            caption = (
+                f"🎵 {html.escape(result['title'])}\n"
+                f"👤 {html.escape(result['artist'])}\n"
+                f"📅 {current_date}\n\n"
+                f"❤️ @GG_Loader_bot"
+            )
+            
+            await callback.message.answer_audio(
+                audio=audio_file, title=result['title'], performer=result['artist'],
+                caption=caption,
+                parse_mode="HTML"
+            )
+            await status_msg.delete()
+            try:
+                await callback.message.delete()
+            except:
+                pass
+        else:
+            await status_msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
@@ -173,7 +238,6 @@ async def handle_audio_link(message: Message, state: FSMContext):
             artist = result['artist']
             cover_path = result.get('thumbnail_path')
             
-            # Применяем обложку если она скачалась
             if cover_path and os.path.exists(cover_path):
                 processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
             else:
@@ -182,13 +246,12 @@ async def handle_audio_link(message: Message, state: FSMContext):
             audio_file = FSInputFile(processed_path)
             thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
             
-            # Обновленный шаблон подписи
             current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
                 f"🎵 {html.escape(title)}\n"
                 f"👤 {html.escape(artist)}\n"
-                f"📅 {current_date}\n"
-                f"Скачано с помощью @GG_Loader_bot"
+                f"📅 {current_date}\n\n"
+                f"❤️ @GG_Loader_bot"
             )
             
             await message.answer_audio(
@@ -204,7 +267,7 @@ async def handle_audio_link(message: Message, state: FSMContext):
         await state.clear()
 
 
-# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО ---
+# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (через меню) ---
 
 @router.callback_query(F.data == "extract_audio")
 async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
@@ -235,13 +298,12 @@ async def handle_extract_link(message: Message, state: FSMContext):
                 
             audio_file = FSInputFile(processed_path)
             
-            # Обновленный шаблон подписи
             current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
                 f"🎵 {html.escape(result['title'])}\n"
                 f"👤 {html.escape(result['artist'])}\n"
-                f"📅 {current_date}\n"
-                f"Скачано с помощью @GG_Loader_bot"
+                f"📅 {current_date}\n\n"
+                f"❤️ @GG_Loader_bot"
             )
             
             await message.answer_audio(
@@ -286,7 +348,7 @@ async def handle_custom_cover(message: Message, state: FSMContext):
     user_temp_dir = data['temp_dir']
     
     cover_path = os.path.join(user_temp_dir, "cover.jpg")
-    photo = message.photo[-1] # Берем наилучшее качество
+    photo = message.photo[-1]
     file = await message.bot.get_file(photo.file_id)
     await message.bot.download_file(file.file_path, cover_path)
     
@@ -307,7 +369,6 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
         
     await state.update_data(title=title, artist=artist)
     
-    # Кнопка для пропуска шага с каналом
     skip_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Пропустить ⏭", callback_data="skip_channel_link")
     ]])
@@ -347,7 +408,6 @@ async def process_final_audio(message: Message, state: FSMContext, channel_link:
         audio_file = FSInputFile(processed_path)
         thumb_file = FSInputFile(cover_path) if os.path.exists(cover_path) else None
         
-        # Формируем итоговый caption с добавлением ссылки на канал при наличии
         current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
             f"🎵 {html.escape(title)}\n"
@@ -357,8 +417,8 @@ async def process_final_audio(message: Message, state: FSMContext, channel_link:
             caption += f"😉 {html.escape(channel_link)}\n"
             
         caption += (
-            f"📅 {current_date}\n"
-            f"Скачано с помощью @GG_Loader_bot"
+            f"📅 {current_date}\n\n"
+            f"❤️ @GG_Loader_bot"
         )
         
         await message.answer_audio(

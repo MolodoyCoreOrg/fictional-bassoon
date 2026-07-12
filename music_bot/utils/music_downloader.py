@@ -6,21 +6,31 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Приоритетные источники для поиска (YouTube исключен для работы в РФ)
-# Используем только проверенные экстракторы yt_dlp
+# Приоритетные источники для поиска
 SEARCH_SOURCES = [
-    'soundcloud',   # SoundCloud - международный, стабильно работает
-    'vk',           # ВКонтакте - может требовать дополнительной настройки
+    'soundcloud',
+    'vk',
 ]
+
+# Антиблокировка
+ANTI_BLOCK_OPTS = {
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios', 'web'],
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    },
+    'nocheckcertificate': True,
+    'quiet': True,
+    'no_warnings': True,
+}
 
 
 async def download_from_url(url: str, temp_dir: str) -> dict:
     """
-    Скачивает аудио из указанного URL (VK, Яндекс Музыка, SoundCloud и др.)
-    
-    :param url: Ссылка на трек
-    :param temp_dir: Директория для временных файлов
-    :return: dict с путями к файлам и метаданными
+    Скачивает аудио из указанного URL
     """
     result = {
         'success': False,
@@ -33,6 +43,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     
     try:
         ydl_opts = {
+            **ANTI_BLOCK_OPTS,
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'postprocessors': [{
@@ -42,24 +53,17 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             }],
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
-            'quiet': True,
-            'no_warnings': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             
-            # Получаем информацию о треке
             result['title'] = info.get('title', 'Неизвестно')
             result['artist'] = info.get('artist') or info.get('uploader', 'Неизвестно')
             
-            # Путь к аудиофайлу
             audio_id = info.get('id')
             result['audio_path'] = os.path.join(temp_dir, f"{audio_id}.mp3")
-            
-            # Путь к обложке
             result['thumbnail_path'] = os.path.join(temp_dir, f"{audio_id}.jpg")
-            
             result['success'] = True
             
     except Exception as e:
@@ -71,11 +75,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
 
 async def search_music(query: str, limit: int = 5) -> list:
     """
-    Ищет музыку по запросу через приоритетные источники (VK, Яндекс Музыка, SoundCloud)
-    
-    :param query: Поисковый запрос
-    :param limit: Количество результатов
-    :return: Список найденных треков
+    Ищет музыку по запросу через приоритетные источники
     """
     results = []
     
@@ -85,19 +85,14 @@ async def search_music(query: str, limit: int = 5) -> list:
             
         try:
             ydl_opts = {
+                **ANTI_BLOCK_OPTS,
                 'format': 'bestaudio/best',
                 'extract_flat': 'in_playlist',
-                'quiet': True,
-                'no_warnings': True,
             }
             
-            # Формируем поисковой запрос для конкретного источника
-            # Используем правильный синтаксис yt_dlp для каждого экстрактора
             if source == 'vk':
-                # VK: поиск через vksearch (может требовать авторизации)
                 search_query = f"vksearch{limit}:{query}"
             elif source == 'soundcloud':
-                # SoundCloud: scsearch работает стабильно
                 search_query = f"scsearch{limit}:{query}"
             else:
                 continue
@@ -110,18 +105,15 @@ async def search_music(query: str, limit: int = 5) -> list:
                 if info and 'entries' in info:
                     for entry in info['entries']:
                         if entry and len(results) < limit:
-                            # Получаем thumbnail из разных источников
                             thumbnail = entry.get('thumbnail')
                             if not thumbnail and entry.get('thumbnails'):
                                 thumbnails = entry.get('thumbnails', [])
                                 if thumbnails:
                                     thumbnail = thumbnails[-1].get('url')
                             
-                            # Формируем URL в зависимости от источника
                             video_id = entry.get('id', '')
                             url = entry.get('url', '')
                             
-                            # Если URL не получен, пробуем сформировать сами
                             if not url and video_id:
                                 if source == 'vk':
                                     url = f"https://vk.com/audio{video_id}"
