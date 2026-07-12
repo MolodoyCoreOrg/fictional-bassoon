@@ -3,16 +3,23 @@ import yt_dlp
 import os
 import re
 import logging
+import asyncio
 from utils.config import FFMPEG_LOCATION, get_anti_block_opts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Приоритетные источники для поиска
+# Приоритетные источники для поиска (ytsearch на первом месте для 100% нахождения)
 SEARCH_SOURCES = [
-    'soundcloud',
-    'vk',
+    'ytsearch',
+    'scsearch',
+    'vksearch',
 ]
+
+
+def _extract_info_sync(ydl, url_or_query, download=False):
+    """Синхронная функция для вызова yt-dlp в отдельном потоке"""
+    return ydl.extract_info(url_or_query, download=download)
 
 
 async def download_from_url(url: str, temp_dir: str) -> dict:
@@ -48,12 +55,12 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             'writethumbnail': True,
         }
         
-        # Передаем путь к ffmpeg, если он найден
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            # Выполняем синхронную загрузку в отдельном потоке, чтобы не блокировать бота
+            info = await asyncio.to_thread(_extract_info_sync, ydl, url, True)
             
             raw_title = info.get('title', 'Неизвестно')
             raw_artist = info.get('artist')
@@ -70,13 +77,12 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
                 if not raw_artist:
                     raw_artist = uploader
             else:
-                # Если artist указан отдельно, но в названии всё равно дублируется "Artist - Title"
                 for sep in [" - ", " — ", " – "]:
                     if sep in raw_title and raw_title.lower().startswith(raw_artist.lower() + sep.strip()):
                         raw_title = raw_title.split(sep, 1)[1].strip()
                         break
 
-            # Очистка названия от лишних тегов (Music Video, Official Audio, Lyrics и т.д.)
+            # Очистка названия от лишних тегов
             clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live|Prod\..*?|with lyrics).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
             if not clean_title:
                 clean_title = raw_title
@@ -142,13 +148,13 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     return result
 
 
-async def search_music(query: str, limit: int = 5) -> list:
+async def search_music(query: str, limit: int = 10) -> list:
     """
-    Ищет музыку по запросу через приоритетные источники
+    Ищет музыку по запросу через приоритетные источники в асинхронном режиме
     """
     results = []
     
-    for source in SEARCH_SOURCES:
+    for prefix in SEARCH_SOURCES:
         if len(results) >= limit:
             break
             
@@ -157,21 +163,17 @@ async def search_music(query: str, limit: int = 5) -> list:
                 **get_anti_block_opts(),
                 'format': 'bestaudio/best',
                 'extract_flat': 'in_playlist',
+                'noplaylist': True,
             }
             if FFMPEG_LOCATION:
                 ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
             
-            if source == 'vk':
-                search_query = f"vksearch{limit}:{query}"
-            elif source == 'soundcloud':
-                search_query = f"scsearch{limit}:{query}"
-            else:
-                continue
-                
-            logger.info(f"Searching in {source}: {search_query}")
+            search_query = f"{prefix}{limit}:{query}"
+            logger.info(f"Searching in {prefix}: {search_query}")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(search_query, download=False)
+                # Асинхронный вызов поиска в отдельном потоке
+                info = await asyncio.to_thread(_extract_info_sync, ydl, search_query, False)
                 
                 if info and 'entries' in info:
                     for entry in info['entries']:
@@ -186,24 +188,30 @@ async def search_music(query: str, limit: int = 5) -> list:
                             url = entry.get('url', '')
                             
                             if not url and video_id:
-                                if source == 'vk':
+                                if prefix.startswith('vk'):
                                     url = f"https://vk.com/audio{video_id}"
-                                elif source == 'soundcloud':
+                                elif prefix.startswith('sc'):
                                     url = f"https://soundcloud.com/{video_id}"
+                                elif prefix.startswith('yt'):
+                                    url = f"https://www.youtube.com/watch?v={video_id}"
+                            
+                            # Очищаем название для красоты
+                            raw_title = entry.get('title', 'Неизвестно')
+                            clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
                             
                             results.append({
-                                'title': entry.get('title', 'Неизвестно'),
+                                'title': clean_title or raw_title,
                                 'artist': entry.get('uploader') or entry.get('artist', 'Неизвестно'),
                                 'url': url,
                                 'duration': entry.get('duration'),
                                 'thumbnail': thumbnail,
-                                'source': source
+                                'source': prefix.replace('search', '')
                             })
                     
-                    logger.info(f"Found {len(results)} results from {source}")
+                    logger.info(f"Found {len(results)} results from {prefix}")
                         
         except Exception as e:
-            logger.warning(f"Search error in {source}: {e}")
+            logger.warning(f"Search error in {prefix}: {e}")
             continue
     
     logger.info(f"Total found {len(results)} results for query: {query}")

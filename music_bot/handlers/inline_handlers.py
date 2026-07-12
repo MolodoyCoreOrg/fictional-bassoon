@@ -1,11 +1,10 @@
 from aiogram import Router, F
-from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from utils.music_downloader import search_music, download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 import hashlib
 import os
 import uuid
-import tempfile
 import aiohttp
 import logging
 import html
@@ -20,24 +19,27 @@ router = Router()
 @router.inline_query()
 async def inline_search(inline_query: InlineQuery):
     """
-    Обработка inline-запросов для поиска музыки
+    Обработка inline-запросов для поиска музыки в точности как на фото 3.
     Пользователь вводит @GG_Loader_bot название песни
     """
     query = inline_query.query.strip()
     
     if not query:
-        # Если запрос пустой, показываем подсказку
+        # Стартовое сообщение при пустом запросе (как на 3-м фото с облачком)
         results = [
             InlineQueryResultArticle(
-                id="help",
-                title="🎵 Поиск музыки",
-                description="Введите название песни или исполнителя для поиска",
-                input_message_content=InputTextMessageContent(message_text="🎵 Введите название песни для поиска"),
-                thumbnail_url="https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+                id="welcome_cloud",
+                title="Привет! 💙",
+                description="Просто напиши артиста или название песни, и я найду их!",
+                input_message_content=InputTextMessageContent(
+                    message_text="🎵 **Поиск музыки ГУЧИГЕНГОВО**\n\nЧтобы найти трек, напишите в любом чате:\n`@GG_Loader_bot название песни`",
+                    parse_mode="Markdown"
+                ),
+                thumbnail_url="https://cdn-icons-png.flaticon.com/512/1163/1163624.png",
             )
         ]
     else:
-        # Ищем музыку (показываем до 10 результатов для пагинации)
+        # Ищем музыку (до 10 результатов для быстрой отрисовки)
         logger.info(f"Inline search query: {query}")
         try:
             search_results = await search_music(query, limit=10)
@@ -47,44 +49,40 @@ async def inline_search(inline_query: InlineQuery):
             search_results = []
         
         results = []
-        for idx, track in enumerate(search_results[:10]):  # Максимум 10 результатов
-            # Создаем уникальный ID
+        for idx, track in enumerate(search_results[:10]):
             result_id = f"{idx}_{hashlib.md5(track['url'].encode()).hexdigest()[:8]}"
             
-            # Форматируем длительность
+            # Форматируем длительность в формате 2:40
             duration = track.get('duration')
             if duration:
                 minutes = int(duration // 60)
                 seconds = int(duration % 60)
                 duration_str = f"{minutes}:{seconds:02d}"
             else:
-                duration_str = ""
+                duration_str = "🎵"
             
             # Кодируем данные для отправки в callback
             track_data = f"{track['title']}|{track['artist']}|{track['url']}|{track.get('thumbnail', '')}"
             
-            # Определяем иконку источника
-            source_icon = {
-                'vk': '🔵',
-                'soundcloud': '🟠'
-            }.get(track.get('source', ''), '🎵')
-            
-            # Создаем клавиатуру с кнопкой для скачивания
+            # Клавиатура с кнопкой скачивания под сообщением
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"download_track:{track_data}")]
             ])
             
+            # Формируем описание в точности как на фото 3: "2:40 • KOTENOK IZ INETA"
+            description_text = f"{duration_str} • {track['artist']}"
+            
             results.append(
                 InlineQueryResultArticle(
                     id=result_id,
-                    title=f"{source_icon} {track['title']}",
-                    description=f"👤 {track['artist']} | ⏱ {duration_str} | {track.get('source', 'Unknown').upper()}",
+                    title=track['title'],
+                    description=description_text,
                     input_message_content=InputTextMessageContent(
-                        message_text=f"🎵 **{track['title']}**\n"
-                                   f"👤 Исполнитель: {track['artist']}\n"
-                                   f"⏱ Длительность: {duration_str}\n\n"
-                                   f"_Нажмите кнопку ниже, чтобы скачать трек с обложкой_",
-                        parse_mode="Markdown"
+                        message_text=f"🎵 <b>{html.escape(track['title'])}</b>\n"
+                                     f"👤 Исполнитель: <b>{html.escape(track['artist'])}</b>\n"
+                                     f"⏱ Длительность: {duration_str}\n\n"
+                                     f"👇 <i>Нажмите кнопку ниже, чтобы скачать трек в MP3 с обложкой и тегами:</i>",
+                        parse_mode="HTML"
                     ),
                     reply_markup=keyboard,
                     thumbnail_url=track.get('thumbnail', "https://cdn-icons-png.flaticon.com/512/1384/1384060.png"),
@@ -99,14 +97,23 @@ async def inline_search(inline_query: InlineQuery):
                 InlineQueryResultArticle(
                     id="no_results",
                     title="❌ Ничего не найдено",
-                    description="Попробуйте другой запрос",
-                    input_message_content=InputTextMessageContent(message_text=f"❌ По запросу \"{query}\" ничего не найдено"),
+                    description=f"По запросу «{query}» треков нет. Попробуйте изменить запрос.",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"❌ По запросу <b>«{html.escape(query)}»</b> ничего не найдено.\nПопробуйте написать название трека или автора иначе.",
+                        parse_mode="HTML"
+                    ),
                     thumbnail_url="https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
                 )
             ]
     
-    # Отправляем результаты с пагинацией (по 2-3 в ряду)
-    await inline_query.answer(results, cache_time=30, is_personal=True)
+    # Отправляем результаты + добавляем верхнюю кнопку "Открыть личные сообщения 💬" (как на фото 3)
+    await inline_query.answer(
+        results, 
+        cache_time=5, 
+        is_personal=True,
+        switch_pm_text="Открыть личные сообщения 💬",
+        switch_pm_parameter="from_inline_search"
+    )
 
 
 async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
@@ -123,7 +130,7 @@ async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
                         f.write(await response.read())
                     return cover_path
     except Exception as e:
-        print(f"Error downloading thumbnail: {e}")
+        logger.error(f"Error downloading thumbnail: {e}")
     return None
 
 
@@ -132,80 +139,71 @@ async def process_inline_download(callback: CallbackQuery):
     """Обработка кнопки скачивания трека из inline-режима"""
     await callback.answer("⏳ Скачиваю трек с обложкой...")
     
-    # Парсим данные трека
-    track_data = callback.data.split(":", 1)[1]
-    parts = track_data.split("|")
-    if len(parts) < 3:
-        await callback.message.answer("❌ Ошибка: неверные данные трека")
+    try:
+        track_data = callback.data.split(":", 1)[1]
+        parts = track_data.split("|")
+        if len(parts) < 3:
+            await callback.message.answer("❌ Ошибка: неверные данные трека")
+            return
+        
+        title = parts[0]
+        artist = parts[1]
+        url = parts[2]
+        thumbnail_url = parts[3] if len(parts) > 3 else ""
+    except Exception:
+        await callback.message.answer("❌ Ошибка разбора данных трека")
         return
     
-    title = parts[0]
-    artist = parts[1]
-    url = parts[2]
-    thumbnail_url = parts[3] if len(parts) > 3 else ""
-    
-    # Создаем временную директорию
     user_temp_dir = os.path.join("/tmp/music_bot", str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
     
     try:
-        # Скачиваем аудио
-        await callback.message.answer("🎵 Скачиваю аудио...")
+        status_msg = await callback.message.answer("🎵 Скачиваю аудио и обложку в лучшем качестве...")
         download_result = await download_from_url(url, user_temp_dir)
         
         if not download_result['success']:
-            await callback.message.answer(f"❌ Ошибка при скачивании: {download_result['error']}")
+            await status_msg.edit_text(f"❌ Ошибка при скачивании: {download_result['error']}")
             await cleanup_temp_files(user_temp_dir)
             return
         
         audio_path = download_result['audio_path']
         
-        # Скачиваем обложку если есть URL
         cover_path = None
         if thumbnail_url:
-            await callback.message.answer("🖼️ Скачиваю обложку...")
             cover_path = await download_thumbnail(thumbnail_url, user_temp_dir)
         
-        # Если обложка не скачалась по URL, используем ту что скачал yt_dlp
         if not cover_path and download_result.get('thumbnail_path'):
             cover_path = download_result['thumbnail_path']
         
-        # Добавляем обложку и метаданные
         if cover_path and os.path.exists(cover_path):
-            await callback.message.answer("🎨 Применяю обложку и метаданные...")
             processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
         else:
             processed_path = audio_path
         
-        # Отправляем готовый файл с обложкой как миниатюрой
-        from aiogram.types import FSInputFile
-        
-        # Создаем InputFile для отправки
         audio_file = FSInputFile(processed_path)
+        thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
         
-        # Обновленный шаблон подписи
         current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
-            f"🎵 {html.escape(title)}\n"
+            f"🎵 <b>{html.escape(title)}</b>\n"
             f"👤 {html.escape(artist)}\n"
-            f"📅 {current_date}\n"
-            f"Скачано с помощью @GG_Loader_bot"
+            f"📅 {current_date}\n\n"
+            f"❤️ @GG_Loader_bot"
         )
         
-        # Отправляем аудио с метаданными
         await callback.message.answer_audio(
             audio=audio_file,
             title=title,
             performer=artist,
             caption=caption,
             parse_mode="HTML",
-            thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
+            thumb=thumb_file
         )
         
-        await callback.message.answer("✅ Трек успешно загружен с обложкой и метаданными!")
+        await status_msg.delete()
         
     except Exception as e:
+        logger.error(f"Error in inline download: {e}")
         await callback.message.answer(f"❌ Произошла ошибка: {str(e)}")
     finally:
-        # Очищаем временные файлы
         await cleanup_temp_files(user_temp_dir)
