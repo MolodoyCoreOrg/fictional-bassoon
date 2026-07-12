@@ -1,7 +1,10 @@
 import yt_dlp
 import os
+import re
+import aiohttp
 import logging
 from typing import List, Dict, Optional
+from utils.config import FFMPEG_LOCATION
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,6 +73,8 @@ def get_video_formats(url: str) -> Dict:
             **ANTI_BLOCK_OPTS,
             'extract_flat': False,
         }
+        if FFMPEG_LOCATION:
+            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -185,6 +190,8 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             'thumbnail_format': 'jpg',
             'merge_output_format': 'mp4',
         }
+        if FFMPEG_LOCATION:
+            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -228,7 +235,11 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             
     except Exception as e:
         logger.error(f"Download error: {e}")
-        result['error'] = str(e)
+        error_str = str(e)
+        if "ffprobe and ffmpeg not found" in error_str or "ffmpeg not found" in error_str:
+            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env."
+        else:
+            result['error'] = error_str
     
     return result
 
@@ -251,29 +262,103 @@ async def download_audio_from_video(url: str, temp_dir: str) -> Dict:
             **ANTI_BLOCK_OPTS,
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
+            'postprocessors': [
+                {
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '320',
+                },
+                {
+                    'key': 'FFmpegThumbnailsConvertor',
+                    'format': 'jpg',
+                }
+            ],
             'writethumbnail': True,
-            'thumbnail_format': 'jpg',
         }
+        if FFMPEG_LOCATION:
+            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             
-            result['title'] = info.get('title', 'Неизвестно')
-            result['artist'] = info.get('uploader', 'Неизвестно')
-            result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
+            raw_title = info.get('title', 'Неизвестно')
+            raw_artist = info.get('artist')
+            uploader = info.get('uploader') or 'Неизвестно'
             
-            audio_id = info.get('id')
-            result['audio_path'] = os.path.join(temp_dir, f"{audio_id}.mp3")
-            result['success'] = True
+            # Умный парсинг названия и исполнителя
+            if not raw_artist or raw_artist == uploader:
+                for sep in [" - ", " — ", " ~ ", " – "]:
+                    if sep in raw_title:
+                        parts = raw_title.split(sep, 1)
+                        raw_artist = parts[0].strip()
+                        raw_title = parts[1].strip()
+                        break
+                if not raw_artist:
+                    raw_artist = uploader
+            else:
+                for sep in [" - ", " — ", " – "]:
+                    if sep in raw_title and raw_title.lower().startswith(raw_artist.lower() + sep.strip()):
+                        raw_title = raw_title.split(sep, 1)[1].strip()
+                        break
+
+            clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live|Prod\..*?|with lyrics).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
+            if not clean_title:
+                clean_title = raw_title
+
+            result['title'] = clean_title
+            result['artist'] = raw_artist
+            
+            audio_id = info.get('id', 'audio')
+            
+            mp3_path = os.path.join(temp_dir, f"{audio_id}.mp3")
+            if os.path.exists(mp3_path):
+                result['audio_path'] = mp3_path
+            else:
+                for file in os.listdir(temp_dir):
+                    if file.endswith('.mp3'):
+                        result['audio_path'] = os.path.join(temp_dir, file)
+                        break
+
+            jpg_path = os.path.join(temp_dir, f"{audio_id}.jpg")
+            if os.path.exists(jpg_path):
+                result['thumbnail_path'] = jpg_path
+            else:
+                for file in os.listdir(temp_dir):
+                    if file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and not file.endswith('.mp3'):
+                        result['thumbnail_path'] = os.path.join(temp_dir, file)
+                        break
+
+            if not result['thumbnail_path']:
+                thumb_url = info.get('thumbnail')
+                if not thumb_url and info.get('thumbnails'):
+                    thumbs = info.get('thumbnails', [])
+                    if thumbs:
+                        thumb_url = thumbs[-1].get('url')
+                
+                if thumb_url:
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(thumb_url) as resp:
+                                if resp.status == 200:
+                                    cover_path = os.path.join(temp_dir, "cover.jpg")
+                                    with open(cover_path, "wb") as f:
+                                        f.write(await resp.read())
+                                    result['thumbnail_path'] = cover_path
+                    except Exception as e:
+                        logger.warning(f"Не удалось скачать обложку: {e}")
+
+            if result['audio_path'] and os.path.exists(result['audio_path']):
+                result['success'] = True
+            else:
+                result['error'] = "Файл аудио не был создан."
             
     except Exception as e:
         logger.error(f"Audio extraction error: {e}")
-        result['error'] = str(e)
+        error_str = str(e)
+        if "ffprobe and ffmpeg not found" in error_str or "ffmpeg not found" in error_str:
+            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env."
+        else:
+            result['error'] = error_str
     
     return result
 
@@ -298,6 +383,9 @@ def detect_platform(url: str) -> Optional[str]:
         'x.com': 'Twitter',
         'facebook.com': 'Facebook',
         'fb.watch': 'Facebook',
+        'soundcloud.com': 'SoundCloud',
+        'music.yandex': 'Yandex Music',
+        'spotify.com': 'Spotify'
     }
     
     for domain, platform in platform_map.items():

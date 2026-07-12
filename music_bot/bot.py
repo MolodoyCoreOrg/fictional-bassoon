@@ -3,7 +3,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from handlers.main_handlers import router as main_router
 from handlers.inline_handlers import router as inline_router
-from utils.config import BOT_TOKEN, TEMP_DIR
+from utils.config import BOT_TOKEN, TEMP_DIR, FFMPEG_LOCATION
 import logging
 import os
 
@@ -18,6 +18,11 @@ async def on_startup(bot: Bot):
     """Вызывается при запуске бота"""
     logging.info("Бот запущен!")
     
+    if FFMPEG_LOCATION:
+        logging.info(f"✅ FFmpeg успешно обнаружен по пути: {FFMPEG_LOCATION}")
+    else:
+        logging.warning("⚠️ ВНИМАНИЕ: FFmpeg не найден в системе или в PATH! Для скачивания и конвертации аудио установите ffmpeg или укажите путь FFMPEG_LOCATION в .env")
+
     # Устанавливаем описание бота
     await bot.set_my_description(
         description="🎵 Бот для загрузки и обработки музыки\n"

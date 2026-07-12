@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear() # Сбрасываем любые зависшие состояния
+    await state.clear()  # Сбрасываем любые зависшие состояния
     user_name = message.from_user.first_name
     
     welcome_text = (
@@ -62,7 +62,7 @@ async def about_guchi(callback: CallbackQuery):
     )
 
 
-# --- 1. СКАЧИВАНИЕ ВИДЕО (с интерфейсом как на скриншотах) ---
+# --- 1. СКАЧИВАНИЕ ВИДЕО ---
 
 @router.callback_query(F.data == "download_video")
 async def process_download_video(callback: CallbackQuery, state: FSMContext):
@@ -86,10 +86,8 @@ async def handle_video_link(message: Message, state: FSMContext):
     await state.update_data(video_url=url)
     keyboard = get_video_quality_keyboard(url, formats_result['formats'], formats_result['title'])
     
-    # Формируем текст подписи как на скриншоте 1
     info_text = f"🍿 <b>{html.escape(formats_result['title'])}</b>"
     
-    # Отправляем фото обложки с кнопками под ней (если обложка есть)
     if formats_result.get('thumbnail'):
         try:
             await message.answer_photo(
@@ -104,7 +102,6 @@ async def handle_video_link(message: Message, state: FSMContext):
         except Exception as e:
             logger.warning(f"Не удалось отправить фото: {e}")
             
-    # Если обложки нет или произошла ошибка отправки фото, шлем текстом
     await msg.edit_text(info_text, reply_markup=keyboard, parse_mode="HTML")
     await state.set_state(None)
 
@@ -118,7 +115,6 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново.", show_alert=True)
         return
 
-    # Отвечаем, чтобы убрать часики на кнопке, и шлем статус
     await callback.answer()
     status_msg = await callback.message.answer("⏳ Загружаю видео... Пожалуйста, подождите.")
     
@@ -130,7 +126,6 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         if result['success']:
             video_file = FSInputFile(result['video_path'])
             
-            # Формируем подпись В ТОЧНОСТИ как на скриншоте 2
             caption = (
                 f"🍿 {html.escape(result['title'])}\n\n"
                 f"🔗 {html.escape(result.get('url', video_url))}\n\n"
@@ -185,6 +180,7 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
                 processed_path = audio_path
                 
             audio_file = FSInputFile(processed_path)
+            thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
             
             current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
@@ -197,7 +193,7 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
             await callback.message.answer_audio(
                 audio=audio_file, title=result['title'], performer=result['artist'],
                 caption=caption,
-                parse_mode="HTML"
+                parse_mode="HTML", thumb=thumb_file
             )
             await status_msg.delete()
             try:
@@ -216,16 +212,16 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
 @router.callback_query(F.data == "download_audio")
 async def process_download_audio(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🎵 <b>Загрузка аудио</b>\n\nОтправьте мне ссылку на трек (SoundCloud, VK, Yandex Music и др.):",
+        "🎵 <b>Загрузка аудио</b>\n\nОтправьте мне ссылку на трек (SoundCloud, VK, Yandex Music, YouTube Music, Spotify и др.):",
         reply_markup=get_back_keyboard(), parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_audio_link)
 
 @router.message(MediaStates.waiting_for_audio_link, F.text.startswith("http"))
-@router.message(F.text.regexp(r'(https?://)?(www\.)?(soundcloud\.com|vk\.com/audio|music\.yandex\.ru).*'))
+@router.message(F.text.regexp(r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music|video)|vk\.ru/(audio|music|video)|music\.yandex\.(ru|com)|music\.youtube\.com|spotify\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com).*'))
 async def handle_audio_link(message: Message, state: FSMContext):
     url = message.text.strip()
-    msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку...")
+    msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...")
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -261,13 +257,16 @@ async def handle_audio_link(message: Message, state: FSMContext):
             )
             await msg.delete()
         else:
-            await msg.edit_text(f"❌ Ошибка: {result['error']}")
+            await msg.edit_text(f"❌ Ошибка загрузки: {result['error']}")
+    except Exception as e:
+        logger.error(f"Error handling audio link: {e}")
+        await msg.edit_text("❌ Произошла ошибка при загрузке трека. Проверьте ссылку или попробуйте позже.")
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
 
 
-# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (через меню) ---
+# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО ---
 
 @router.callback_query(F.data == "extract_audio")
 async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
@@ -297,6 +296,7 @@ async def handle_extract_link(message: Message, state: FSMContext):
                 processed_path = audio_path
                 
             audio_file = FSInputFile(processed_path)
+            thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
             
             current_date = datetime.now().strftime("%d/%m/%Y")
             caption = (
@@ -309,7 +309,7 @@ async def handle_extract_link(message: Message, state: FSMContext):
             await message.answer_audio(
                 audio=audio_file, title=result['title'], performer=result['artist'],
                 caption=caption,
-                parse_mode="HTML"
+                parse_mode="HTML", thumb=thumb_file
             )
             await msg.delete()
         else:
