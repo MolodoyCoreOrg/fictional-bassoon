@@ -17,7 +17,10 @@ from utils.keyboard import (
     get_about_guchi_keyboard, get_video_quality_keyboard,
     get_extract_format_keyboard
 )
-from utils.video_downloader import get_video_formats, download_video, download_audio_from_video, detect_platform
+from utils.video_downloader import (
+    get_video_formats, download_video, download_audio_from_video, 
+    detect_platform, extract_audio_from_local_video
+)
 from utils.music_downloader import download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 
@@ -46,7 +49,8 @@ async def cmd_start(message: Message, state: FSMContext):
         "1. Зайди в нужную соцсеть или приложение.\n"
         "2. Найди интересное видео, фото или трек.\n"
         "3. Нажми кнопку «Скопировать ссылку».\n"
-        "4. Отправь ссылку мне (или выбери пункт в меню ниже), и я пришлю тебе готовый файл! 👇"
+        "4. Отправь ссылку мне (или выбери пункт в меню ниже), и я пришлю тебе готовый файл! 👇\n\n"
+        "💡 <i>А ещё ты можешь просто прислать мне любое видео в чат, чтобы мгновенно вытащить из него звук!</i>"
     )
     
     await message.answer(welcome_text, reply_markup=get_welcome_menu(), parse_mode="HTML")
@@ -243,12 +247,12 @@ async def handle_audio_link(message: Message, state: FSMContext):
         await state.clear()
 
 
-# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (С ВЫБОРОМ ФОРМАТА) ---
+# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (С ВЫБОРОМ ФОРМАТА И ПОДДЕРЖКОЙ ФАЙЛОВ) ---
 
 @router.callback_query(F.data == "extract_audio")
 async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🔊 <b>Извлечение аудио</b>\n\nОтправьте ссылку на видео, а я достану из него звук:",
+        "🔊 <b>Извлечение аудио</b>\n\nОтправьте мне ссылку на видео <b>ИЛИ</b> просто прикрепите и пришлите сам видеофайл в этот чат, а я достану из него звук:",
         reply_markup=get_back_keyboard(), parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_extract_link)
@@ -256,7 +260,7 @@ async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
 @router.message(StateFilter(MediaStates.waiting_for_extract_link), F.text.regexp(r'https?://[^\s]+'))
 async def handle_extract_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
-    await state.update_data(extract_url=url)
+    await state.update_data(extract_url=url, local_video_path=None)
     await message.answer(
         f"🔗 Вижу ссылку: <code>{html.escape(url)}</code>\n\n"
         "🎵 <b>В каком формате вы хотите получить аудиодорожку?</b>\n\n"
@@ -267,13 +271,68 @@ async def handle_extract_link(message: Message, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_extract_format)
 
+@router.message(StateFilter(None, MediaStates.waiting_for_extract_link), F.video | F.document)
+async def handle_video_file_for_audio(message: Message, state: FSMContext):
+    """Перехватывает видеофайлы, присланные в чат напрямую, для быстрого извлечения звука"""
+    video_obj = message.video if message.video else message.document
+    
+    # Если это документ, проверяем, что это действительно видео по mime-типу или расширению файла
+    if message.document:
+        mime = getattr(message.document, 'mime_type', '') or ''
+        fname = getattr(message.document, 'file_name', '') or ''
+        if not (mime.startswith('video/') or fname.lower().endswith(('.mp4', '.mkv', '.mov', '.avi', '.webm'))):
+            return  # Игнорируем обычные документы и не-видео файлы
+
+    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+    os.makedirs(user_temp_dir, exist_ok=True)
+    
+    video_path = os.path.join(user_temp_dir, f"input_{video_obj.file_unique_id}.mp4")
+    status_msg = await message.answer("⏳ Сохраняю ваше видео на сервере для извлечения аудио...")
+    
+    try:
+        file = await message.bot.get_file(video_obj.file_id)
+        await message.bot.download_file(file.file_path, video_path)
+        
+        # Красиво извлекаем название из имени файла или подписи к видео
+        title = "Аудио из видео"
+        if getattr(video_obj, 'file_name', None):
+            title = os.path.splitext(video_obj.file_name)[0]
+        elif message.caption:
+            title = message.caption[:30].strip()
+            
+        await state.update_data(
+            local_video_path=video_path,
+            local_temp_dir=user_temp_dir,
+            video_title=title,
+            video_artist="GG_Loader",
+            extract_url=None,
+            video_url=None
+        )
+        
+        await status_msg.edit_text(
+            f"🍿 <b>Видео успешно получено!</b>\n\n"
+            "🎵 <b>В каком формате вы хотите получить аудиодорожку?</b>\n\n"
+            "• <b>MP3</b> — полноценный музыкальный файл с тегами (удобно слушать в плеере).\n"
+            "• <b>Голосовое сообщение</b> — аудиосообщение в чате (удобно быстро переслать или послушать х2).",
+            reply_markup=get_extract_format_keyboard(),
+            parse_mode="HTML"
+        )
+        await state.set_state(MediaStates.waiting_for_extract_format)
+    except Exception as e:
+        logger.error(f"Error downloading video file from tg: {e}")
+        await status_msg.edit_text("❌ Произошла ошибка при загрузке видеофайла из Telegram. Попробуйте отправить видео меньшего размера или ссылку.")
+        await cleanup_temp_files(user_temp_dir)
+        await state.clear()
+
 @router.callback_query(StateFilter(MediaStates.waiting_for_extract_format, None), F.data.in_({"ext_fmt_mp3", "ext_fmt_voice"}))
 async def process_extract_format_selection(callback: CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     url = user_data.get("extract_url") or user_data.get("video_url")
+    local_video_path = user_data.get("local_video_path")
+    local_temp_dir = user_data.get("local_temp_dir")
     
-    if not url:
-        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново.", show_alert=True)
+    if not url and not local_video_path:
+        await callback.answer("❌ Ошибка: ссылка или файл потеряны. Отправьте видео заново.", show_alert=True)
         await state.clear()
         return
 
@@ -283,12 +342,20 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
     
     status_msg = await callback.message.answer(f"⏳ Извлекаю аудио как {fmt_name}... Пожалуйста, подождите.")
     
-    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+    user_temp_dir = local_temp_dir if local_temp_dir else os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
     
     try:
         output_format = 'voice' if is_voice else 'mp3'
-        result = await download_audio_from_video(url, user_temp_dir, output_format=output_format)
+        
+        # Если звук извлекается из присланного локального видеофайла
+        if local_video_path and os.path.exists(local_video_path):
+            title = user_data.get("video_title", "Аудио из видео")
+            artist = user_data.get("video_artist", "GG_Loader")
+            result = await extract_audio_from_local_video(local_video_path, user_temp_dir, output_format=output_format, title=title, artist=artist)
+        else:
+            # Если звук извлекается по ссылке
+            result = await download_audio_from_video(url, user_temp_dir, output_format=output_format)
         
         if result['success']:
             audio_path = result['audio_path']

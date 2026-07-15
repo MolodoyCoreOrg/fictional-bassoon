@@ -3,6 +3,10 @@ import os
 import re
 import aiohttp
 import logging
+import asyncio
+import subprocess
+import shutil
+import uuid
 from typing import List, Dict, Optional
 from utils.config import FFMPEG_LOCATION, get_anti_block_opts
 
@@ -231,7 +235,7 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
 
 async def download_audio_from_video(url: str, temp_dir: str, output_format: str = 'mp3') -> Dict:
     """
-    Извлекает аудио из видео с поддержкой выбора формата:
+    Извлекает аудио из видео по ссылке с поддержкой выбора формата:
     - 'mp3': обычный музыкальный файл
     - 'voice': голосовое сообщение для Telegram (кодек OPUS в контейнере OGG)
     """
@@ -376,6 +380,70 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
         else:
             result['error'] = error_str
     
+    return result
+
+
+async def extract_audio_from_local_video(video_path: str, temp_dir: str, output_format: str = 'mp3', title: str = "Аудио из видео", artist: str = "GG_Loader") -> Dict:
+    """
+    Извлекает аудио напрямую из локально загруженного видеофайла с помощью FFmpeg
+    """
+    result = {
+        'success': False,
+        'audio_path': None,
+        'title': title or "Аудио из видео",
+        'artist': artist or "GG_Loader",
+        'thumbnail_path': None,
+        'error': None
+    }
+    
+    try:
+        if not os.path.exists(video_path):
+            result['error'] = "Локальный видеофайл не найден на сервере."
+            return result
+
+        # Определяем путь к исполняемому файлу ffmpeg
+        ffmpeg_exe = "ffmpeg"
+        if FFMPEG_LOCATION:
+            if os.path.isfile(FFMPEG_LOCATION):
+                ffmpeg_exe = FFMPEG_LOCATION
+            else:
+                for exe in ["ffmpeg", "ffmpeg.exe"]:
+                    p = os.path.join(FFMPEG_LOCATION, exe)
+                    if os.path.exists(p):
+                        ffmpeg_exe = p
+                        break
+        else:
+            ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
+
+        file_id = str(uuid.uuid4())[:8]
+        
+        if output_format == 'voice':
+            output_path = os.path.join(temp_dir, f"voice_{file_id}.ogg")
+            cmd = [ffmpeg_exe, '-y', '-i', video_path, '-vn', '-c:a', 'libopus', '-b:a', '64k', output_path]
+        else:
+            output_path = os.path.join(temp_dir, f"audio_{file_id}.mp3")
+            cmd = [ffmpeg_exe, '-y', '-i', video_path, '-vn', '-ar', '44100', '-ac', '2', '-b:a', '320k', output_path]
+
+        def run_ffmpeg():
+            return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        process = await asyncio.to_thread(run_ffmpeg)
+        
+        if process.returncode == 0 and os.path.exists(output_path):
+            result['audio_path'] = output_path
+            result['success'] = True
+        else:
+            logger.error(f"FFmpeg stderr: {process.stderr}")
+            result['error'] = f"В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env (переменная FFMPEG_LOCATION)."
+            
+    except Exception as e:
+        logger.error(f"Local video audio extraction error: {e}")
+        error_str = str(e)
+        if "No such file or directory: 'ffmpeg'" in error_str or "not found" in error_str or "WinError 2" in error_str:
+            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env (переменная FFMPEG_LOCATION)."
+        else:
+            result['error'] = str(e)
+            
     return result
 
 
