@@ -25,7 +25,6 @@ async def inline_search(inline_query: InlineQuery):
     query = inline_query.query.strip()
     
     if not query:
-        # Стартовое сообщение при пустом запросе (как на 3-м фото с облачком)
         results = [
             InlineQueryResultArticle(
                 id="welcome_cloud",
@@ -39,7 +38,6 @@ async def inline_search(inline_query: InlineQuery):
             )
         ]
     else:
-        # Ищем музыку (до 10 результатов для быстрой отрисовки)
         logger.info(f"Inline search query: {query}")
         try:
             search_results = await search_music(query, limit=10)
@@ -52,7 +50,6 @@ async def inline_search(inline_query: InlineQuery):
         for idx, track in enumerate(search_results[:10]):
             result_id = f"{idx}_{hashlib.md5(track['url'].encode()).hexdigest()[:8]}"
             
-            # Форматируем длительность в формате 2:40
             duration = track.get('duration')
             if duration:
                 minutes = int(duration // 60)
@@ -61,15 +58,13 @@ async def inline_search(inline_query: InlineQuery):
             else:
                 duration_str = "🎵"
             
-            # Кодируем данные для отправки в callback
+            # Кодируем данные для отправки в callback (без потери ссылки)
             track_data = f"{track['title']}|{track['artist']}|{track['url']}|{track.get('thumbnail', '')}"
             
-            # Клавиатура с кнопкой скачивания под сообщением
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"download_track:{track_data}")]
             ])
             
-            # Формируем описание в точности как на фото 3: "2:40 • KOTENOK IZ INETA"
             description_text = f"{duration_str} • {track['artist']}"
             
             results.append(
@@ -91,7 +86,6 @@ async def inline_search(inline_query: InlineQuery):
                 )
             )
         
-        # Если ничего не найдено
         if not results:
             results = [
                 InlineQueryResultArticle(
@@ -106,7 +100,6 @@ async def inline_search(inline_query: InlineQuery):
                 )
             ]
     
-    # Отправляем результаты + добавляем верхнюю кнопку "Открыть личные сообщения 💬" (как на фото 3)
     await inline_query.answer(
         results, 
         cache_time=5, 
@@ -136,7 +129,7 @@ async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
 
 @router.callback_query(F.data.startswith("download_track:"))
 async def process_inline_download(callback: CallbackQuery):
-    """Обработка кнопки скачивания трека из inline-режима"""
+    """Обработка кнопки скачивания трека из inline-режима (мгновенно, без потери ссылки)"""
     await callback.answer("⏳ Скачиваю трек с обложкой...")
     
     try:

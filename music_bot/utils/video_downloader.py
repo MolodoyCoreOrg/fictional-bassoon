@@ -46,7 +46,7 @@ def format_duration(seconds: int) -> str:
 
 def get_video_formats(url: str) -> Dict:
     """
-    Получает доступные форматы видео для указанной ссылки
+    Получает все доступные разрешения видео (4K, 1080p, 720p, 480p, 360p, 240p, 144p)
     """
     result = {
         'success': False,
@@ -61,6 +61,8 @@ def get_video_formats(url: str) -> Dict:
         ydl_opts = {
             **get_anti_block_opts(),
             'extract_flat': False,
+            'quiet': True,
+            'no_warnings': True
         }
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
@@ -71,7 +73,6 @@ def get_video_formats(url: str) -> Dict:
             result['title'] = info.get('title', 'Неизвестно')
             result['duration'] = info.get('duration', 0)
             
-            # Получаем обложку наилучшего качества
             thumbnail = info.get('thumbnail')
             if not thumbnail and info.get('thumbnails'):
                 thumbnails = info.get('thumbnails', [])
@@ -80,11 +81,13 @@ def get_video_formats(url: str) -> Dict:
             result['thumbnail'] = thumbnail
             
             formats_list = []
-            seen_formats = set()
+            seen_resolutions = set()
             formats = info.get('formats', [])
             
+            # Собираем все форматы, у которых есть видео
             for fmt in formats:
-                if not fmt.get('vcodec') or fmt.get('vcodec') == 'none':
+                vcodec = fmt.get('vcodec', 'none')
+                if not vcodec or vcodec == 'none':
                     continue
                 
                 format_id = fmt.get('format_id', '')
@@ -92,7 +95,9 @@ def get_video_formats(url: str) -> Dict:
                 width = fmt.get('width', 0)
                 ext = fmt.get('ext', 'mp4')
                 filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
-                quality_name = fmt.get('format_note', '') or fmt.get('quality', '')
+                
+                if not height:
+                    continue
                 
                 if height >= 2160:
                     quality_label = "4K"
@@ -106,13 +111,17 @@ def get_video_formats(url: str) -> Dict:
                     quality_label = "480p"
                 elif height >= 360:
                     quality_label = "360p"
+                elif height >= 240:
+                    quality_label = "240p"
+                elif height >= 144:
+                    quality_label = "144p"
                 else:
-                    quality_label = f"{height}p" if height else "SD"
+                    quality_label = f"{height}p"
                 
-                format_key = f"{height}_{ext}"
-                if format_key in seen_formats or not height:
+                # Фильтруем дубликаты по высоте экрана, чтобы предложить лучшее качество для каждого разрешения
+                if height in seen_resolutions:
                     continue
-                seen_formats.add(format_key)
+                seen_resolutions.add(height)
                 
                 size_mb = filesize / (1024 * 1024) if filesize else None
                 too_large = size_mb and size_mb > MAX_FILE_SIZE_BYTES / (1024 * 1024)
@@ -122,18 +131,21 @@ def get_video_formats(url: str) -> Dict:
                 else:
                     size_str = "⌛"
                 
+                # Используем селектор загрузки: видео указанной высоты + лучшее аудио
+                dl_format = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+                
                 formats_list.append({
-                    'format_id': format_id,
+                    'format_id': dl_format,
                     'height': height,
                     'width': width,
-                    'ext': ext,
+                    'ext': 'mp4',
                     'quality_label': quality_label,
                     'size_str': size_str,
                     'filesize': filesize,
                     'too_large': too_large,
-                    'has_audio': fmt.get('acodec') is not None and fmt.get('acodec') != 'none',
+                    'has_audio': True,
                     'url': fmt.get('url'),
-                    'format_note': quality_name
+                    'format_note': fmt.get('format_note', '')
                 })
             
             formats_list.sort(key=lambda x: x['height'], reverse=True)
@@ -141,6 +153,22 @@ def get_video_formats(url: str) -> Dict:
             
             if not filtered_formats and formats_list:
                 filtered_formats = [formats_list[-1]]
+            
+            # Если по какой-то причине список пуст, даем стандартный выбор best
+            if not filtered_formats:
+                filtered_formats = [{
+                    'format_id': 'bestvideo+bestaudio/best',
+                    'height': 1080,
+                    'width': 1920,
+                    'ext': 'mp4',
+                    'quality_label': 'Лучшее качество',
+                    'size_str': '⌛',
+                    'filesize': None,
+                    'too_large': False,
+                    'has_audio': True,
+                    'url': url,
+                    'format_note': 'Best'
+                }]
             
             result['formats'] = filtered_formats
             result['success'] = True
@@ -154,7 +182,7 @@ def get_video_formats(url: str) -> Dict:
 
 async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     """
-    Скачивает видео в указанном качестве и извлекает дополнительные данные
+    Скачивает видео с жесткой конвертацией в MP4 (H.264/AAC), чтобы оно идеально воспроизводилось в Telegram без сжатия
     """
     result = {
         'success': False,
@@ -167,17 +195,25 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
         'upload_date': None,
         'duration_str': None,
         'quality': None,
-        'url': None
+        'url': None,
+        'width': 0,
+        'height': 0
     }
     
     try:
         ydl_opts = {
             **get_anti_block_opts(),
-            'format': f'{format_id}+bestaudio[ext=m4a]/best',
+            'format': format_id,
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
             'merge_output_format': 'mp4',
+            'postprocessors': [
+                {
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }
+            ]
         }
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
@@ -194,17 +230,22 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             duration = info.get('duration', 0)
             result['duration_str'] = format_duration(duration)
             
-            height = info.get('height')
-            if not height:
+            height = info.get('height', 0)
+            width = info.get('width', 0)
+            if not height or not width:
                 for f in info.get('requested_formats', []):
-                    if f.get('vcodec') and f.get('vcodec') != 'none':
+                    if f.get('height'):
                         height = f.get('height')
+                        width = f.get('width', int(height * 16 / 9))
                         break
+            
+            result['height'] = height or 720
+            result['width'] = width or int(result['height'] * 16 / 9)
             result['quality'] = f"{height}p" if height else "MP4"
             result['url'] = info.get('webpage_url') or url
             
             video_id = info.get('id')
-            possible_extensions = ['mp4', 'mkv', 'webm', 'avi']
+            possible_extensions = ['mp4', 'mkv', 'webm', 'avi', 'mov']
             
             for ext in possible_extensions:
                 path = os.path.join(temp_dir, f"{video_id}.{ext}")
@@ -215,7 +256,7 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             
             if not result['video_path']:
                 for file in os.listdir(temp_dir):
-                    if file.endswith(('.mp4', '.mkv', '.webm', '.avi')) and file != f"{video_id}.jpg":
+                    if file.endswith(('.mp4', '.mkv', '.webm', '.avi', '.mov')) and not file.endswith('.jpg'):
                         result['video_path'] = os.path.join(temp_dir, file)
                         result['filesize'] = os.path.getsize(result['video_path'])
                         break
@@ -258,7 +299,6 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
             
         if output_format == 'voice':
-            # Для голосового сообщения в Telegram требуется кодек OPUS
             ydl_opts['postprocessors'] = [
                 {
                     'key': 'FFmpegExtractAudio',
@@ -266,7 +306,6 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
                 }
             ]
         else:
-            # Для стандартного MP3 файла
             ydl_opts['postprocessors'] = [
                 {
                     'key': 'FFmpegExtractAudio',
@@ -287,7 +326,6 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
             raw_artist = info.get('artist')
             uploader = info.get('uploader') or 'Неизвестно'
             
-            # Умный парсинг названия и исполнителя
             if not raw_artist or raw_artist == uploader:
                 for sep in [" - ", " — ", " ~ ", " – "]:
                     if sep in raw_title:
@@ -329,7 +367,6 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
                         result['audio_path'] = os.path.join(temp_dir, file)
                         break
 
-            # Для голосовых сообщений переименовываем .opus в .ogg для 100% совместимости со всеми клиентами Telegram
             if output_format == 'voice' and result['audio_path'] and result['audio_path'].endswith('.opus'):
                 ogg_path = result['audio_path'][:-5] + '.ogg'
                 try:
@@ -401,7 +438,6 @@ async def extract_audio_from_local_video(video_path: str, temp_dir: str, output_
             result['error'] = "Локальный видеофайл не найден на сервере."
             return result
 
-        # Определяем путь к исполняемому файлу ffmpeg
         ffmpeg_exe = "ffmpeg"
         if FFMPEG_LOCATION:
             if os.path.isfile(FFMPEG_LOCATION):

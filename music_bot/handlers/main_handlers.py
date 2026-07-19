@@ -27,8 +27,12 @@ from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Регулярное выражение для мгновенного перехвата ссылок из любых соцсетей (работает без кнопок и меню)
+VIDEO_REGEX = r'(https?://)?(www\.|m\.)?(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vk\.com/video|vk\.ru/video|rutube\.ru|pinterest\.com|pin\.it|x\.com|twitter\.com|facebook\.com|fb\.watch)[^\s]*'
+AUDIO_REGEX = r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music)|vk\.ru/(audio|music)|music\.yandex\.(ru|com)|music\.youtube\.com|spotify\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com)[^\s]*'
+
 def extract_url(text: str) -> str:
-    """Извлекает первую ссылку из текста сообщения (на случай, если пользователь отправил текст вместе со ссылкой)"""
+    """Извлекает первую ссылку из текста сообщения"""
     if not text:
         return ""
     match = re.search(r'https?://[^\s]+', text)
@@ -38,7 +42,7 @@ def extract_url(text: str) -> str:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()  # Сбрасываем любые зависшие состояния
+    await state.clear()
     user_name = message.from_user.first_name
     
     welcome_text = (
@@ -50,7 +54,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "2. Найди интересное видео, фото или трек.\n"
         "3. Нажми кнопку «Скопировать ссылку».\n"
         "4. Отправь ссылку мне (или выбери пункт в меню ниже), и я пришлю тебе готовый файл! 👇\n\n"
-        "💡 <i>А ещё ты можешь просто прислать мне любое видео в чат, чтобы мгновенно вытащить из него звук!</i>"
+        "💡 <i>А ещё ты можешь просто прислать мне любую ссылку на видео в чат, без нажатий кнопок!</i>"
     )
     
     await message.answer(welcome_text, reply_markup=get_welcome_menu(), parse_mode="HTML")
@@ -74,7 +78,7 @@ async def about_guchi(callback: CallbackQuery):
     )
 
 
-# --- 1. СКАЧИВАНИЕ ВИДЕО ---
+# --- 1. УНИВЕРСАЛЬНОЕ СКАЧИВАНИЕ ВИДЕО (РАБОТАЕТ ВСЕГДА И СРАЗУ) ---
 
 @router.callback_query(F.data == "download_video")
 async def process_download_video(callback: CallbackQuery, state: FSMContext):
@@ -85,9 +89,13 @@ async def process_download_video(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MediaStates.waiting_for_video_link)
 
 @router.message(StateFilter(MediaStates.waiting_for_video_link), F.text.regexp(r'https?://[^\s]+'))
+@router.message(F.text.regexp(VIDEO_REGEX))
 async def handle_video_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
     msg = await message.answer("⏳ Анализирую ссылку и ищу доступные форматы...")
+    
+    # Кэшируем ссылку сразу, чтобы она точно не потерялась
+    await state.update_data(video_url=url, extract_url=url)
     
     formats_result = get_video_formats(url)
     if not formats_result['success'] or not formats_result['formats']:
@@ -95,7 +103,6 @@ async def handle_video_link(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    await state.update_data(video_url=url)
     keyboard = get_video_quality_keyboard(url, formats_result['formats'], formats_result['title'])
     
     info_text = f"🍿 <b>{html.escape(formats_result['title'])}</b>"
@@ -109,26 +116,24 @@ async def handle_video_link(message: Message, state: FSMContext):
                 parse_mode="HTML"
             )
             await msg.delete()
-            await state.set_state(None)
             return
         except Exception as e:
             logger.warning(f"Не удалось отправить фото: {e}")
             
     await msg.edit_text(info_text, reply_markup=keyboard, parse_mode="HTML")
-    await state.set_state(None)
 
 @router.callback_query(F.data.startswith("viddl_"))
 async def download_selected_video(callback: CallbackQuery, state: FSMContext):
-    format_id = callback.data.split("_")[1]
+    format_id = callback.data.split("_", 1)[1]
     user_data = await state.get_data()
     video_url = user_data.get("video_url")
     
     if not video_url:
-        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново.", show_alert=True)
+        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново в чат.", show_alert=True)
         return
 
     await callback.answer()
-    status_msg = await callback.message.answer("⏳ Загружаю видео... Пожалуйста, подождите.")
+    status_msg = await callback.message.answer("⏳ Загружаю видео в максимальном качестве... Пожалуйста, подождите.")
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -145,9 +150,16 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                 f"❤️ @GG_Loader_bot"
             )
             
+            thumb_file = FSInputFile(result['thumbnail_path']) if result['thumbnail_path'] and os.path.exists(result['thumbnail_path']) else None
+            
+            # Отправляем видео с правильными параметрами ширины, высоты и обложки, чтобы Telegram не превращал его в квадрат!
             await callback.message.answer_video(
                 video=video_file,
                 caption=caption,
+                width=result.get('width', 1920),
+                height=result.get('height', 1080),
+                cover=thumb_file,
+                supports_streaming=True,
                 parse_mode="HTML"
             )
             await status_msg.delete()
@@ -171,11 +183,10 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
     video_url = user_data.get("video_url")
     
     if not video_url:
-        await callback.answer("❌ Ошибка: ссылка потеряна.", show_alert=True)
+        await callback.answer("❌ Ошибка: ссылка потеряна. Пришлите её еще раз.", show_alert=True)
         return
 
     await callback.answer()
-    # Переводим в меню выбора формата (MP3 или Voice)
     await state.update_data(extract_url=video_url)
     await callback.message.edit_text(
         f"🍿 Видео: <code>{html.escape(video_url)}</code>\n\n"
@@ -199,7 +210,7 @@ async def process_download_audio(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MediaStates.waiting_for_audio_link)
 
 @router.message(StateFilter(MediaStates.waiting_for_audio_link), F.text.regexp(r'https?://[^\s]+'))
-@router.message(StateFilter(None, MediaStates.waiting_for_audio_link), F.text.regexp(r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music|video)|vk\.ru/(audio|music|video)|music\.yandex\.(ru|com)|music\.youtube\.com|spotify\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com).*'))
+@router.message(F.text.regexp(AUDIO_REGEX))
 async def handle_audio_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
     msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...")
@@ -247,7 +258,7 @@ async def handle_audio_link(message: Message, state: FSMContext):
         await state.clear()
 
 
-# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО (С ВЫБОРОМ ФОРМАТА И ПОДДЕРЖКОЙ ФАЙЛОВ) ---
+# --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО ---
 
 @router.callback_query(F.data == "extract_audio")
 async def process_extract_audio_btn(callback: CallbackQuery, state: FSMContext):
@@ -271,17 +282,16 @@ async def handle_extract_link(message: Message, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_extract_format)
 
-@router.message(StateFilter(None, MediaStates.waiting_for_extract_link), F.video | F.document)
+@router.message(F.video | F.document)
 async def handle_video_file_for_audio(message: Message, state: FSMContext):
-    """Перехватывает видеофайлы, присланные в чат напрямую, для быстрого извлечения звука"""
+    """Перехватывает видеофайлы для быстрого извлечения звука"""
     video_obj = message.video if message.video else message.document
     
-    # Если это документ, проверяем, что это действительно видео по mime-типу или расширению файла
     if message.document:
         mime = getattr(message.document, 'mime_type', '') or ''
         fname = getattr(message.document, 'file_name', '') or ''
         if not (mime.startswith('video/') or fname.lower().endswith(('.mp4', '.mkv', '.mov', '.avi', '.webm'))):
-            return  # Игнорируем обычные документы и не-видео файлы
+            return
 
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -293,7 +303,6 @@ async def handle_video_file_for_audio(message: Message, state: FSMContext):
         file = await message.bot.get_file(video_obj.file_id)
         await message.bot.download_file(file.file_path, video_path)
         
-        # Красиво извлекаем название из имени файла или подписи к видео
         title = "Аудио из видео"
         if getattr(video_obj, 'file_name', None):
             title = os.path.splitext(video_obj.file_name)[0]
@@ -348,20 +357,17 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
     try:
         output_format = 'voice' if is_voice else 'mp3'
         
-        # Если звук извлекается из присланного локального видеофайла
         if local_video_path and os.path.exists(local_video_path):
             title = user_data.get("video_title", "Аудио из видео")
             artist = user_data.get("video_artist", "GG_Loader")
             result = await extract_audio_from_local_video(local_video_path, user_temp_dir, output_format=output_format, title=title, artist=artist)
         else:
-            # Если звук извлекается по ссылке
             result = await download_audio_from_video(url, user_temp_dir, output_format=output_format)
         
         if result['success']:
             audio_path = result['audio_path']
             
             if is_voice:
-                # Отправляем как голосовое сообщение Telegram (Voice Note)
                 voice_file = FSInputFile(audio_path)
                 caption = (
                     f"🎙 <b>{html.escape(result['title'])}</b>\n"
@@ -374,7 +380,6 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
                     parse_mode="HTML"
                 )
             else:
-                # Отправляем как полноценный MP3 трек с обложкой
                 cover_path = result.get('thumbnail_path')
                 if cover_path and os.path.exists(cover_path):
                     processed_path = await add_cover_to_mp3(audio_path, cover_path, result['title'], result['artist'])

@@ -33,17 +33,15 @@ def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
     return create_keyboard(buttons)
 
 def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKeyboardMarkup:
-    """Генерирует клавиатуру как на скриншоте: кнопки в 2-3 ряда + кнопка Audio внизу"""
+    """
+    Генерирует сетку кнопок для выбора разрешений как на скриншоте
+    (от 144p до 4K, по 3 кнопки в каждом ряду + кнопка Audio внизу)
+    """
     buttons = []
     current_row = []
     
-    # Берем до 6-9 лучших форматов и строим сетку по 3 кнопки в ряд
-    for fmt in formats[:9]:
-        # Формируем текст как на скриншоте: 1080p или 720p ( ⌛ )
-        if fmt['size_str'] == "⌛":
-            quality_text = f"🎬 {fmt['quality_label']} (⏳)"
-        else:
-            quality_text = f"🎬 {fmt['quality_label']}"
+    for fmt in formats:
+        quality_text = f"🎬 {fmt['quality_label']}"
             
         callback_data = f"viddl_{fmt['format_id']}"
         current_row.append(create_button(quality_text, callback_data=callback_data))
@@ -55,7 +53,6 @@ def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKey
     if current_row:
         buttons.append(current_row)
     
-    # Добавляем широкую кнопку Audio внизу (как на фото 1)
     buttons.append([create_button("🎵 Audio", callback_data="vid_audio_extract")])
     buttons.append([create_button("❌ Отмена", callback_data="cancel_action")])
     
