@@ -59,7 +59,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
 
         if not has_ffmpeg():
-            result['error'] = 'В системе не найдены обе утилиты FFmpeg и ffprobe. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на папку, где лежат ffmpeg и ffprobe.'
+            result['error'] = 'В системе не найден FFmpeg. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на файл ffmpeg/папку с ffmpeg.'
             return result
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -146,7 +146,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         error_str = str(e)
         lower_error = error_str.lower()
         if "ffprobe and ffmpeg not found" in lower_error or "ffmpeg not found" in lower_error or "ffmpeg is not installed" in lower_error:
-            result['error'] = "В системе не найдены обе утилиты FFmpeg и ffprobe. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на папку, где лежат ffmpeg и ffprobe."
+            result['error'] = "В системе не найден FFmpeg. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на файл ffmpeg/папку с ffmpeg."
         elif "unsupported url" in lower_error and "vk.com/audio" in lower_error:
             result['error'] = "VK Audio по прямым ссылкам не отдаёт файлы через yt-dlp без официального доступа/авторизации. Пришлите название трека в inline-поиск или используйте ссылку на VK Video/другой открытый источник."
         elif "unsupported url" in lower_error:

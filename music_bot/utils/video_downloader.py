@@ -8,7 +8,7 @@ import subprocess
 import shutil
 import uuid
 from typing import Dict, Optional
-from utils.config import FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
+from utils.config import FFMPEG_EXECUTABLE, FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -460,18 +460,10 @@ async def extract_audio_from_local_video(video_path: str, temp_dir: str, output_
             result['error'] = "Локальный видеофайл не найден на сервере."
             return result
 
-        ffmpeg_exe = "ffmpeg"
-        if FFMPEG_LOCATION:
-            if os.path.isfile(FFMPEG_LOCATION):
-                ffmpeg_exe = FFMPEG_LOCATION
-            else:
-                for exe in ["ffmpeg", "ffmpeg.exe"]:
-                    p = os.path.join(FFMPEG_LOCATION, exe)
-                    if os.path.exists(p):
-                        ffmpeg_exe = p
-                        break
-        else:
-            ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
+        ffmpeg_exe = FFMPEG_EXECUTABLE or shutil.which("ffmpeg")
+        if not ffmpeg_exe:
+            result['error'] = "В системе не найден FFmpeg. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на файл ffmpeg/папку с ffmpeg."
+            return result
 
         file_id = str(uuid.uuid4())[:8]
         
@@ -492,13 +484,14 @@ async def extract_audio_from_local_video(video_path: str, temp_dir: str, output_
             result['success'] = True
         else:
             logger.error(f"FFmpeg stderr: {process.stderr}")
-            result['error'] = f"В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env (переменная FFMPEG_LOCATION)."
+            stderr_tail = (process.stderr or "").strip()[-1000:]
+            result['error'] = f"FFmpeg не смог извлечь аудио из видео. Подробности: {stderr_tail}"
             
     except Exception as e:
         logger.error(f"Local video audio extraction error: {e}")
         error_str = str(e)
         if "No such file or directory: 'ffmpeg'" in error_str or "not found" in error_str or "WinError 2" in error_str:
-            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env (переменная FFMPEG_LOCATION)."
+            result['error'] = "В системе не найден FFmpeg. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на файл ffmpeg/папку с ffmpeg."
         else:
             result['error'] = str(e)
             
