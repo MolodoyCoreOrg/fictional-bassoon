@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
-from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
@@ -15,7 +15,7 @@ from utils.config import TEMP_DIR
 from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard,
-    get_extract_format_keyboard
+    get_extract_format_keyboard, get_skip_channel_keyboard
 )
 from utils.video_downloader import (
     get_video_formats, download_video, download_audio_from_video, 
@@ -62,6 +62,12 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "back_to_menu")
 @router.callback_query(F.data == "cancel_action")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    for temp_dir_key in ("temp_dir", "local_temp_dir"):
+        temp_dir = user_data.get(temp_dir_key)
+        if temp_dir:
+            await cleanup_temp_files(temp_dir)
+
     await state.clear()
     await callback.message.edit_text(
         "Вы вернулись в главное меню. Что будем делать? 👇",
@@ -437,7 +443,10 @@ async def handle_custom_audio(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, audio_path)
     
     await state.update_data(audio_path=audio_path, temp_dir=user_temp_dir)
-    await message.answer("✅ Аудио получено! Теперь отправьте картинку для обложки (желательно квадратную):")
+    await message.answer(
+        "✅ Аудио получено! Теперь отправьте картинку для обложки (желательно квадратную):",
+        reply_markup=get_back_keyboard()
+    )
     await state.set_state(MediaStates.waiting_for_cover)
 
 @router.message(StateFilter(MediaStates.waiting_for_cover), F.photo)
@@ -453,6 +462,7 @@ async def handle_custom_cover(message: Message, state: FSMContext):
     await state.update_data(cover_path=cover_path)
     await message.answer(
         "✅ Обложка загружена!\n\nТеперь отправьте название трека и исполнителя в формате:\n<code>Название - Исполнитель</code>",
+        reply_markup=get_back_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_track_info)
@@ -467,16 +477,12 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
         
     await state.update_data(title=title, artist=artist)
     
-    skip_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Пропустить ⏭", callback_data="skip_channel_link")
-    ]])
-    
     await message.answer(
         "✅ Название и автор сохранены!\n\n"
         "😉 <b>Опционально:</b> Отправьте ссылку на ваш канал (например, @guchigengovo), "
         "чтобы она отображалась в сообщении с треком.\n"
         "Если не хотите, нажмите кнопку «Пропустить»:",
-        reply_markup=skip_kb,
+        reply_markup=get_skip_channel_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_channel_link)
