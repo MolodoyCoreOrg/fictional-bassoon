@@ -20,7 +20,7 @@ def get_welcome_menu() -> InlineKeyboardMarkup:
     return create_keyboard(buttons)
 
 def get_back_keyboard() -> InlineKeyboardMarkup:
-    return create_keyboard([[create_button("🔙 Назад в меню", callback_data="back_to_menu")]])
+    return create_keyboard([[create_button("⬅️ Назад в меню", callback_data="back_to_menu")]])
 
 def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
     buttons = [
@@ -28,7 +28,7 @@ def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
         [create_button("🍒 СИСЬКИ", url="https://t.me/CuCbKu_gg_bot")],
         [create_button("📢 Основной канал ГУЧИГЕНГОВО", url="https://t.me/guchigengovo")],
         [create_button("👥 Участники Гучигенгово", url="https://t.me/guchigengovo/70")],
-        [create_button("🔙 Назад в меню", callback_data="back_to_menu")]
+        [create_button("⬅️ Назад в меню", callback_data="back_to_menu")]
     ]
     return create_keyboard(buttons)
 
@@ -54,7 +54,7 @@ def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKey
         buttons.append(current_row)
     
     buttons.append([create_button("🎵 Audio", callback_data="vid_audio_extract")])
-    buttons.append([create_button("❌ Отмена", callback_data="cancel_action")])
+    buttons.append([create_button("⬅️ Назад в меню", callback_data="back_to_menu")])
     
     return create_keyboard(buttons)
 
@@ -63,6 +63,13 @@ def get_extract_format_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [create_button("🎶 MP3 файл (с обложкой и тегами)", callback_data="ext_fmt_mp3")],
         [create_button("🎙 Голосовое сообщение (Voice / OGG)", callback_data="ext_fmt_voice")],
-        [create_button("❌ Отмена", callback_data="cancel_action")]
+        [create_button("⬅️ Назад в меню", callback_data="back_to_menu")]
+    ]
+    return create_keyboard(buttons)
+
+def get_skip_channel_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [create_button("Пропустить ⏭", callback_data="skip_channel_link")],
+        [create_button("⬅️ Назад в меню", callback_data="back_to_menu")]
     ]
     return create_keyboard(buttons)
