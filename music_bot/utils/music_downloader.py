@@ -4,7 +4,7 @@ import os
 import re
 import logging
 import asyncio
-from utils.config import FFMPEG_LOCATION, get_anti_block_opts
+from utils.config import FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 SEARCH_SOURCES = [
     'ytsearch',
     'scsearch',
-    'vksearch',
 ]
 
 
@@ -40,6 +39,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         ydl_opts = {
             **get_anti_block_opts(),
             'format': 'bestaudio/best',
+            'socket_timeout': 15,
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'postprocessors': [
                 {
@@ -57,6 +57,10 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+
+        if not has_ffmpeg():
+            result['error'] = 'В системе не найдены обе утилиты FFmpeg и ffprobe. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на папку, где лежат ffmpeg и ffprobe.'
+            return result
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Выполняем синхронную загрузку в отдельном потоке, чтобы не блокировать бота
@@ -140,8 +144,13 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     except Exception as e:
         logger.error(f"Download error: {e}")
         error_str = str(e)
-        if "ffprobe and ffmpeg not found" in error_str or "ffmpeg not found" in error_str:
-            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env (переменная FFMPEG_LOCATION)."
+        lower_error = error_str.lower()
+        if "ffprobe and ffmpeg not found" in lower_error or "ffmpeg not found" in lower_error or "ffmpeg is not installed" in lower_error:
+            result['error'] = "В системе не найдены обе утилиты FFmpeg и ffprobe. Установите пакет ffmpeg или укажите в .env FFMPEG_LOCATION на папку, где лежат ffmpeg и ffprobe."
+        elif "unsupported url" in lower_error and "vk.com/audio" in lower_error:
+            result['error'] = "VK Audio по прямым ссылкам не отдаёт файлы через yt-dlp без официального доступа/авторизации. Пришлите название трека в inline-поиск или используйте ссылку на VK Video/другой открытый источник."
+        elif "unsupported url" in lower_error:
+            result['error'] = "Эта ссылка не поддерживается текущей версией yt-dlp или площадка требует авторизацию/cookies. Обновите yt-dlp, проверьте публичность ссылки или добавьте cookies.txt."
         else:
             result['error'] = error_str
     
@@ -164,6 +173,7 @@ async def search_music(query: str, limit: int = 10) -> list:
                 'format': 'bestaudio/best',
                 'extract_flat': 'in_playlist',
                 'noplaylist': True,
+                'socket_timeout': 10,
             }
             if FFMPEG_LOCATION:
                 ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
@@ -173,7 +183,10 @@ async def search_music(query: str, limit: int = 10) -> list:
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 # Асинхронный вызов поиска в отдельном потоке
-                info = await asyncio.to_thread(_extract_info_sync, ydl, search_query, False)
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(_extract_info_sync, ydl, search_query, False),
+                    timeout=12
+                )
                 
                 if info and 'entries' in info:
                     for entry in info['entries']:
@@ -185,15 +198,14 @@ async def search_music(query: str, limit: int = 10) -> list:
                                     thumbnail = thumbnails[-1].get('url')
                             
                             video_id = entry.get('id', '')
-                            url = entry.get('url', '')
-                            
-                            if not url and video_id:
-                                if prefix.startswith('vk'):
-                                    url = f"https://vk.com/audio{video_id}"
-                                elif prefix.startswith('sc'):
-                                    url = f"https://soundcloud.com/{video_id}"
-                                elif prefix.startswith('yt'):
-                                    url = f"https://www.youtube.com/watch?v={video_id}"
+                            url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url', '')
+
+                            if prefix.startswith('yt') and video_id and not str(url).startswith('http'):
+                                url = f"https://www.youtube.com/watch?v={video_id}"
+                            elif prefix.startswith('sc') and entry.get('webpage_url'):
+                                url = entry['webpage_url']
+                            elif not url and video_id:
+                                url = f"https://www.youtube.com/watch?v={video_id}"
                             
                             # Очищаем название для красоты
                             raw_title = entry.get('title', 'Неизвестно')
