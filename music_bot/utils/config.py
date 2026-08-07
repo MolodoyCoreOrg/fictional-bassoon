@@ -29,6 +29,15 @@ if not os.path.exists(COOKIES_FILE):
     else:
         COOKIES_FILE = None
 
+def _dir_has_ffmpeg_pair(path: str) -> bool:
+    """Проверяет, что в директории есть и ffmpeg, и ffprobe."""
+    if not path or not os.path.isdir(path):
+        return False
+    ffmpeg_found = any(os.path.exists(os.path.join(path, exe)) for exe in ["ffmpeg", "ffmpeg.exe"])
+    ffprobe_found = any(os.path.exists(os.path.join(path, exe)) for exe in ["ffprobe", "ffprobe.exe"])
+    return ffmpeg_found and ffprobe_found
+
+
 def get_ffmpeg_location():
     """
     Автоматический поиск пути к директории с исполняемыми файлами ffmpeg и ffprobe.
@@ -38,21 +47,27 @@ def get_ffmpeg_location():
     # 1. Проверяем переменную из .env
     env_path = os.getenv("FFMPEG_LOCATION")
     if env_path and os.path.exists(env_path):
-        if os.path.isfile(env_path):
-            return os.path.dirname(env_path)
-        return env_path
+        candidate = os.path.dirname(env_path) if os.path.isfile(env_path) else env_path
+        if _dir_has_ffmpeg_pair(candidate):
+            return candidate
 
     # 2. Поиск через системный PATH
     which_ffmpeg = shutil.which("ffmpeg")
-    if which_ffmpeg:
-        return os.path.dirname(which_ffmpeg)
+    which_ffprobe = shutil.which("ffprobe")
+    if which_ffmpeg and which_ffprobe:
+        ffmpeg_dir = os.path.dirname(which_ffmpeg)
+        ffprobe_dir = os.path.dirname(which_ffprobe)
+        if ffmpeg_dir == ffprobe_dir:
+            return ffmpeg_dir
+        return ffmpeg_dir
 
     # 3. Запасной бинарник из Python-пакета imageio-ffmpeg
     if imageio_ffmpeg:
         try:
             bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            if bundled_ffmpeg and os.path.exists(bundled_ffmpeg):
-                return os.path.dirname(bundled_ffmpeg)
+            bundled_dir = os.path.dirname(bundled_ffmpeg) if bundled_ffmpeg and os.path.exists(bundled_ffmpeg) else None
+            if bundled_dir and _dir_has_ffmpeg_pair(bundled_dir):
+                return bundled_dir
         except Exception:
             pass
 
@@ -70,23 +85,18 @@ def get_ffmpeg_location():
         r"D:\ffmpeg\bin",
     ]
     for path in common_paths:
-        if os.path.exists(path):
-            for exe in ["ffmpeg", "ffmpeg.exe"]:
-                if os.path.exists(os.path.join(path, exe)):
-                    return path
+        if _dir_has_ffmpeg_pair(path):
+            return path
     return None
 
 # Определяем путь к ffmpeg для yt-dlp
 FFMPEG_LOCATION = get_ffmpeg_location()
 
 def has_ffmpeg():
-    """Проверяет, доступен ли ffmpeg для склейки и конвертации медиа."""
-    if not FFMPEG_LOCATION:
-        return False
-    for exe in ["ffmpeg", "ffmpeg.exe"]:
-        if os.path.exists(os.path.join(FFMPEG_LOCATION, exe)):
-            return True
-    return bool(shutil.which("ffmpeg"))
+    """Проверяет, доступны ли ffmpeg и ffprobe для склейки и конвертации медиа."""
+    if FFMPEG_LOCATION and _dir_has_ffmpeg_pair(FFMPEG_LOCATION):
+        return True
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 def get_anti_block_opts():
     """

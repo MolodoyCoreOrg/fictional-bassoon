@@ -15,15 +15,29 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Telegram ограничивает callback_data 64 байтами. Поэтому в кнопку кладём только короткий ключ,
+# а полные данные трека временно храним в памяти процесса.
+INLINE_TRACK_CACHE = {}
+MAX_INLINE_CACHE_SIZE = 500
+
+
+def _cache_inline_track(track: dict) -> str:
+    cache_key = hashlib.sha256(f"{track.get('url', '')}|{track.get('title', '')}".encode()).hexdigest()[:24]
+    INLINE_TRACK_CACHE[cache_key] = track
+    if len(INLINE_TRACK_CACHE) > MAX_INLINE_CACHE_SIZE:
+        oldest_key = next(iter(INLINE_TRACK_CACHE))
+        INLINE_TRACK_CACHE.pop(oldest_key, None)
+    return cache_key
+
 
 @router.inline_query()
 async def inline_search(inline_query: InlineQuery):
     """
-    Обработка inline-запросов для поиска музыки в точности как на фото 3.
-    Пользователь вводит @GG_Loader_bot название песни
+    Обработка inline-запросов для поиска музыки.
+    Пользователь вводит @GG_Loader_bot название песни.
     """
     query = inline_query.query.strip()
-    
+
     if not query:
         results = [
             InlineQueryResultArticle(
@@ -45,11 +59,16 @@ async def inline_search(inline_query: InlineQuery):
         except Exception as e:
             logger.error(f"Search failed: {e}")
             search_results = []
-        
+
         results = []
         for idx, track in enumerate(search_results[:10]):
-            result_id = f"{idx}_{hashlib.md5(track['url'].encode()).hexdigest()[:8]}"
-            
+            track_url = track.get('url') or ''
+            if not track_url:
+                continue
+
+            result_id = f"{idx}_{hashlib.md5(track_url.encode()).hexdigest()[:8]}"
+            cache_key = _cache_inline_track(track)
+
             duration = track.get('duration')
             if duration:
                 minutes = int(duration // 60)
@@ -57,16 +76,13 @@ async def inline_search(inline_query: InlineQuery):
                 duration_str = f"{minutes}:{seconds:02d}"
             else:
                 duration_str = "🎵"
-            
-            # Кодируем данные для отправки в callback (без потери ссылки)
-            track_data = f"{track['title']}|{track['artist']}|{track['url']}|{track.get('thumbnail', '')}"
-            
+
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"download_track:{track_data}")]
+                [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"dl:{cache_key}")]
             ])
-            
+
             description_text = f"{duration_str} • {track['artist']}"
-            
+
             results.append(
                 InlineQueryResultArticle(
                     id=result_id,
@@ -80,12 +96,12 @@ async def inline_search(inline_query: InlineQuery):
                         parse_mode="HTML"
                     ),
                     reply_markup=keyboard,
-                    thumbnail_url=track.get('thumbnail', "https://cdn-icons-png.flaticon.com/512/1384/1384060.png"),
-                    url=track['url'],
+                    thumbnail_url=track.get('thumbnail') or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+                    url=track_url,
                     hide_url=True,
                 )
             )
-        
+
         if not results:
             results = [
                 InlineQueryResultArticle(
@@ -99,10 +115,10 @@ async def inline_search(inline_query: InlineQuery):
                     thumbnail_url="https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
                 )
             ]
-    
+
     await inline_query.answer(
-        results, 
-        cache_time=5, 
+        results,
+        cache_time=5,
         is_personal=True,
         switch_pm_text="Открыть личные сообщения 💬",
         switch_pm_parameter="from_inline_search"
@@ -113,7 +129,7 @@ async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
     """Скачивает обложку по URL"""
     if not thumbnail_url:
         return None
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(thumbnail_url) as response:
@@ -127,55 +143,55 @@ async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
     return None
 
 
-@router.callback_query(F.data.startswith("download_track:"))
+@router.callback_query(F.data.startswith("dl:"))
 async def process_inline_download(callback: CallbackQuery):
-    """Обработка кнопки скачивания трека из inline-режима (мгновенно, без потери ссылки)"""
+    """Обработка кнопки скачивания трека из inline-режима."""
     await callback.answer("⏳ Скачиваю трек с обложкой...")
-    
-    try:
-        track_data = callback.data.split(":", 1)[1]
-        parts = track_data.split("|")
-        if len(parts) < 3:
-            await callback.message.answer("❌ Ошибка: неверные данные трека")
-            return
-        
-        title = parts[0]
-        artist = parts[1]
-        url = parts[2]
-        thumbnail_url = parts[3] if len(parts) > 3 else ""
-    except Exception:
-        await callback.message.answer("❌ Ошибка разбора данных трека")
+
+    cache_key = callback.data.split(":", 1)[1]
+    track = INLINE_TRACK_CACHE.get(cache_key)
+    if not track:
+        await callback.message.answer("❌ Данные трека устарели. Выполните inline-поиск заново и нажмите кнопку скачивания ещё раз.")
         return
-    
+
+    title = track.get('title') or 'Неизвестно'
+    artist = track.get('artist') or 'Неизвестно'
+    url = track.get('url')
+    thumbnail_url = track.get('thumbnail') or ''
+
+    if not url:
+        await callback.message.answer("❌ Ошибка: ссылка трека не найдена")
+        return
+
     user_temp_dir = os.path.join("/tmp/music_bot", str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
-    
+
     try:
         status_msg = await callback.message.answer("🎵 Скачиваю аудио и обложку в лучшем качестве...")
         download_result = await download_from_url(url, user_temp_dir)
-        
+
         if not download_result['success']:
             await status_msg.edit_text(f"❌ Ошибка при скачивании: {download_result['error']}")
             await cleanup_temp_files(user_temp_dir)
             return
-        
+
         audio_path = download_result['audio_path']
-        
+
         cover_path = None
         if thumbnail_url:
             cover_path = await download_thumbnail(thumbnail_url, user_temp_dir)
-        
+
         if not cover_path and download_result.get('thumbnail_path'):
             cover_path = download_result['thumbnail_path']
-        
+
         if cover_path and os.path.exists(cover_path):
             processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
         else:
             processed_path = audio_path
-        
+
         audio_file = FSInputFile(processed_path)
         thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
-        
+
         current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
             f"🎵 <b>{html.escape(title)}</b>\n"
@@ -183,7 +199,7 @@ async def process_inline_download(callback: CallbackQuery):
             f"📅 {current_date}\n\n"
             f"❤️ @GG_Loader_bot"
         )
-        
+
         await callback.message.answer_audio(
             audio=audio_file,
             title=title,
@@ -192,9 +208,9 @@ async def process_inline_download(callback: CallbackQuery):
             parse_mode="HTML",
             thumb=thumb_file
         )
-        
+
         await status_msg.delete()
-        
+
     except Exception as e:
         logger.error(f"Error in inline download: {e}")
         await callback.message.answer(f"❌ Произошла ошибка: {str(e)}")
