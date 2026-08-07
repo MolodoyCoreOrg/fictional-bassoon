@@ -29,49 +29,71 @@ if not os.path.exists(COOKIES_FILE):
     else:
         COOKIES_FILE = None
 
-def _dir_has_ffmpeg_pair(path: str) -> bool:
-    """Проверяет, что в директории есть и ffmpeg, и ffprobe."""
+
+def _existing_executable(path: str) -> str | None:
+    """Возвращает путь к существующему исполняемому файлу или None."""
+    if not path or not os.path.isfile(path):
+        return None
+    return path if os.access(path, os.X_OK) or os.name == "nt" else None
+
+
+def _find_executable_in_dir(path: str, names: list[str]) -> str | None:
+    """Ищет исполняемый файл в указанной директории."""
     if not path or not os.path.isdir(path):
-        return False
-    ffmpeg_found = any(os.path.exists(os.path.join(path, exe)) for exe in ["ffmpeg", "ffmpeg.exe"])
-    ffprobe_found = any(os.path.exists(os.path.join(path, exe)) for exe in ["ffprobe", "ffprobe.exe"])
-    return ffmpeg_found and ffprobe_found
+        return None
+    for name in names:
+        executable = _existing_executable(os.path.join(path, name))
+        if executable:
+            return executable
+    return None
 
 
-def get_ffmpeg_location():
+def _resolve_executable(path: str, names: list[str]) -> str | None:
+    """Принимает путь к файлу или директории и возвращает найденный бинарник."""
+    if not path:
+        return None
+    expanded_path = os.path.expanduser(os.path.expandvars(path.strip().strip('"').strip("'")))
+    if os.path.isfile(expanded_path):
+        basename = os.path.basename(expanded_path).lower()
+        valid_names = {name.lower() for name in names}
+        if basename in valid_names or basename.split(".")[0] in {name.split(".")[0].lower() for name in names}:
+            return _existing_executable(expanded_path)
+        return None
+    return _find_executable_in_dir(expanded_path, names)
+
+
+def _get_imageio_ffmpeg_executable() -> str | None:
+    """Возвращает bundled FFmpeg из imageio-ffmpeg, если пакет установлен."""
+    if not imageio_ffmpeg:
+        return None
+    try:
+        bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+    return _existing_executable(bundled_ffmpeg)
+
+
+def get_ffmpeg_executable() -> str | None:
     """
-    Автоматический поиск пути к директории с исполняемыми файлами ffmpeg и ffprobe.
-    Сначала проверяет переменную окружения FFMPEG_LOCATION в .env, 
-    затем системный PATH, затем стандартные директории установки в разных ОС.
+    Находит исполняемый файл ffmpeg.
+
+    Важно: пакет imageio-ffmpeg поставляет только ffmpeg без ffprobe. Для локального
+    извлечения аудио и большинства postprocessor-операций достаточно ffmpeg, поэтому
+    бот не должен считать установку сломанной только из-за отсутствия ffprobe.
     """
-    # 1. Проверяем переменную из .env
     env_path = os.getenv("FFMPEG_LOCATION")
-    if env_path and os.path.exists(env_path):
-        candidate = os.path.dirname(env_path) if os.path.isfile(env_path) else env_path
-        if _dir_has_ffmpeg_pair(candidate):
-            return candidate
+    env_ffmpeg = _resolve_executable(env_path, ["ffmpeg", "ffmpeg.exe"])
+    if env_ffmpeg:
+        return env_ffmpeg
 
-    # 2. Поиск через системный PATH
-    which_ffmpeg = shutil.which("ffmpeg")
-    which_ffprobe = shutil.which("ffprobe")
-    if which_ffmpeg and which_ffprobe:
-        ffmpeg_dir = os.path.dirname(which_ffmpeg)
-        ffprobe_dir = os.path.dirname(which_ffprobe)
-        if ffmpeg_dir == ffprobe_dir:
-            return ffmpeg_dir
-        return ffmpeg_dir
+    path_ffmpeg = shutil.which("ffmpeg")
+    if path_ffmpeg:
+        return path_ffmpeg
 
-    # 3. Запасной бинарник из Python-пакета imageio-ffmpeg
-    if imageio_ffmpeg:
-        try:
-            bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            bundled_dir = os.path.dirname(bundled_ffmpeg) if bundled_ffmpeg and os.path.exists(bundled_ffmpeg) else None
-            if bundled_dir and _dir_has_ffmpeg_pair(bundled_dir):
-                return bundled_dir
-        except Exception:
-            pass
+    bundled_ffmpeg = _get_imageio_ffmpeg_executable()
+    if bundled_ffmpeg:
+        return bundled_ffmpeg
 
-    # 4. Популярные пути установки в Linux, macOS и Windows
     common_paths = [
         "/usr/bin",
         "/usr/local/bin",
@@ -85,18 +107,89 @@ def get_ffmpeg_location():
         r"D:\ffmpeg\bin",
     ]
     for path in common_paths:
-        if _dir_has_ffmpeg_pair(path):
-            return path
+        ffmpeg = _find_executable_in_dir(path, ["ffmpeg", "ffmpeg.exe"])
+        if ffmpeg:
+            return ffmpeg
     return None
+
+
+def get_ffprobe_executable() -> str | None:
+    """Находит ffprobe рядом с FFMPEG_LOCATION, в PATH или стандартных директориях."""
+    env_path = os.getenv("FFMPEG_LOCATION")
+    env_ffprobe = _resolve_executable(env_path, ["ffprobe", "ffprobe.exe"])
+    if env_ffprobe:
+        return env_ffprobe
+
+    ffmpeg = get_ffmpeg_executable()
+    if ffmpeg:
+        sibling = _find_executable_in_dir(os.path.dirname(ffmpeg), ["ffprobe", "ffprobe.exe"])
+        if sibling:
+            return sibling
+
+    path_ffprobe = shutil.which("ffprobe")
+    if path_ffprobe:
+        return path_ffprobe
+
+    common_paths = [
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/var/www/music_bot/venv/bin",
+        "/usr/lib/ffmpeg",
+        r"C:\ffmpeg\bin",
+        r"C:\Program Files\ffmpeg\bin",
+        r"C:\Program Files (x86)\ffmpeg\bin",
+        r"C:\tools\ffmpeg\bin",
+        r"D:\ffmpeg\bin",
+    ]
+    for path in common_paths:
+        ffprobe = _find_executable_in_dir(path, ["ffprobe", "ffprobe.exe"])
+        if ffprobe:
+            return ffprobe
+    return None
+
+
+def get_ffmpeg_location():
+    """
+    Возвращает значение для yt-dlp ffmpeg_location.
+
+    Если задан FFMPEG_LOCATION, поддерживаются оба варианта: путь к папке с бинарниками
+    и прямой путь к ffmpeg. Без переменной окружения бот использует системный ffmpeg
+    или bundled ffmpeg из imageio-ffmpeg.
+    """
+    ffmpeg = get_ffmpeg_executable()
+    if not ffmpeg:
+        return None
+
+    env_path = os.getenv("FFMPEG_LOCATION")
+    if env_path:
+        expanded_path = os.path.expanduser(os.path.expandvars(env_path.strip().strip('"').strip("'")))
+        if os.path.isdir(expanded_path):
+            return expanded_path
+        if os.path.isfile(expanded_path):
+            return expanded_path
+
+    ffprobe = get_ffprobe_executable()
+    if ffprobe and os.path.dirname(ffprobe) == os.path.dirname(ffmpeg):
+        return os.path.dirname(ffmpeg)
+    return ffmpeg
+
 
 # Определяем путь к ffmpeg для yt-dlp
 FFMPEG_LOCATION = get_ffmpeg_location()
+FFMPEG_EXECUTABLE = get_ffmpeg_executable()
+FFPROBE_EXECUTABLE = get_ffprobe_executable()
+
 
 def has_ffmpeg():
-    """Проверяет, доступны ли ffmpeg и ffprobe для склейки и конвертации медиа."""
-    if FFMPEG_LOCATION and _dir_has_ffmpeg_pair(FFMPEG_LOCATION):
-        return True
-    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    """Проверяет, доступен ли ffmpeg для склейки и конвертации медиа."""
+    return bool(FFMPEG_EXECUTABLE)
+
+
+def has_ffprobe():
+    """Проверяет, доступен ли ffprobe для анализа медиа."""
+    return bool(FFPROBE_EXECUTABLE)
+
 
 def get_anti_block_opts():
     """
