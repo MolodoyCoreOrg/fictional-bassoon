@@ -7,8 +7,8 @@ import asyncio
 import subprocess
 import shutil
 import uuid
-from typing import List, Dict, Optional
-from utils.config import FFMPEG_LOCATION, get_anti_block_opts
+from typing import Dict, Optional
+from utils.config import FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 # Поддерживаемые платформы
 SUPPORTED_PLATFORMS = [
     'youtube',
-    'instagram', 
+    'instagram',
     'rutube',
     'vk',
     'pinterest',
@@ -28,11 +28,15 @@ SUPPORTED_PLATFORMS = [
     'facebook'
 ]
 
+QUALITY_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+
+
 def format_date(date_str: str) -> str:
     """Форматирует дату из YYYYMMDD в DD.MM.YYYY"""
     if not date_str or len(date_str) != 8:
         return "Неизвестно"
     return f"{date_str[6:8]}.{date_str[4:6]}.{date_str[0:4]}"
+
 
 def format_duration(seconds: int) -> str:
     """Форматирует секунды в H:MM:SS или M:SS"""
@@ -44,10 +48,64 @@ def format_duration(seconds: int) -> str:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
+
+def quality_label(height: int) -> str:
+    if height >= 2160:
+        return "4K"
+    if height >= 1440:
+        return "2K"
+    return f"{height}p"
+
+
+def _has_audio(fmt: Dict) -> bool:
+    return bool(fmt.get('acodec') and fmt.get('acodec') != 'none')
+
+
+def _has_video(fmt: Dict) -> bool:
+    return bool(fmt.get('vcodec') and fmt.get('vcodec') != 'none' and fmt.get('height'))
+
+
+def _build_download_format(height: int) -> str:
+    """Возвращает короткий callback-safe маркер качества."""
+    return f"h{height}"
+
+
+def _resolve_download_format(format_id: str) -> str:
+    """
+    Преобразует короткий маркер кнопки в селектор yt-dlp.
+
+    Если FFmpeg доступен, скачиваем лучшее видео до выбранной высоты + лучшее аудио.
+    Если FFmpeg недоступен, используем только готовый muxed-файл, чтобы VK/YouTube не падали
+    с ошибкой requested merging but ffmpeg is not installed.
+    """
+    match = re.fullmatch(r"h(\d+)", format_id or "")
+    if not match:
+        return format_id
+
+    height = int(match.group(1))
+    if has_ffmpeg():
+        return (
+            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={height}]+bestaudio/"
+            f"best[height<={height}]/best"
+        )
+    return f"best[height<={height}][vcodec!=none][acodec!=none]/best[height<={height}]/best"
+
+
+def _human_error(error: Exception) -> str:
+    error_str = str(error)
+    lower = error_str.lower()
+    if "ffprobe and ffmpeg not found" in lower or "ffmpeg not found" in lower or "ffmpeg is not installed" in lower:
+        return "В системе не найден FFmpeg. Установите ffmpeg или задайте FFMPEG_LOCATION в .env. Для Docker пересоберите образ; в requirements также добавлен imageio-ffmpeg как запасной вариант."
+    if "instagram sent an empty media response" in lower or "without being logged-in" in lower:
+        return "Instagram не отдал медиа без авторизации. Проверьте, что пост публичный; для приватных/ограниченных постов добавьте cookies.txt и укажите COOKIES_FILE в .env или настройте COOKIES_FROM_BROWSER."
+    if "unsupported url" in lower:
+        return "Площадка или формат ссылки не поддержаны текущей версией yt-dlp. Обновите yt-dlp и проверьте ссылку."
+    return error_str
+
+
 def get_video_formats(url: str) -> Dict:
-    """
-    Получает все доступные разрешения видео (4K, 1080p, 720p, 480p, 360p, 240p, 144p)
-    """
+    """Получает доступные разрешения видео для кнопок выбора качества."""
     result = {
         'success': False,
         'formats': [],
@@ -56,110 +114,79 @@ def get_video_formats(url: str) -> Dict:
         'thumbnail': None,
         'error': None
     }
-    
+
     try:
         ydl_opts = {
             **get_anti_block_opts(),
             'extract_flat': False,
-            'quiet': True,
-            'no_warnings': True
+            'skip_download': True,
         }
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
-        
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
+
             result['title'] = info.get('title', 'Неизвестно')
             result['duration'] = info.get('duration', 0)
-            
+
             thumbnail = info.get('thumbnail')
             if not thumbnail and info.get('thumbnails'):
                 thumbnails = info.get('thumbnails', [])
                 if thumbnails:
                     thumbnail = thumbnails[-1].get('url')
             result['thumbnail'] = thumbnail
-            
+
+            formats = info.get('formats') or []
+            available_heights = sorted({fmt.get('height') for fmt in formats if _has_video(fmt)}, reverse=True)
+
+            if not available_heights and (info.get('height') or info.get('url')):
+                available_heights = [info.get('height') or 720]
+
             formats_list = []
-            seen_resolutions = set()
-            formats = info.get('formats', [])
-            
-            # Собираем все форматы, у которых есть видео
-            for fmt in formats:
-                vcodec = fmt.get('vcodec', 'none')
-                if not vcodec or vcodec == 'none':
+            for target in QUALITY_HEIGHTS:
+                candidates = [height for height in available_heights if height and height <= target]
+                if not candidates:
                     continue
-                
-                format_id = fmt.get('format_id', '')
-                height = fmt.get('height', 0)
-                width = fmt.get('width', 0)
-                ext = fmt.get('ext', 'mp4')
-                filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
-                
-                if not height:
+                height = max(candidates)
+                if any(item['height'] == height for item in formats_list):
                     continue
-                
-                if height >= 2160:
-                    quality_label = "4K"
-                elif height >= 1440:
-                    quality_label = "2K"
-                elif height >= 1080:
-                    quality_label = "1080p"
-                elif height >= 720:
-                    quality_label = "720p"
-                elif height >= 480:
-                    quality_label = "480p"
-                elif height >= 360:
-                    quality_label = "360p"
-                elif height >= 240:
-                    quality_label = "240p"
-                elif height >= 144:
-                    quality_label = "144p"
-                else:
-                    quality_label = f"{height}p"
-                
-                # Фильтруем дубликаты по высоте экрана, чтобы предложить лучшее качество для каждого разрешения
-                if height in seen_resolutions:
-                    continue
-                seen_resolutions.add(height)
-                
+
+                height_formats = [fmt for fmt in formats if fmt.get('height') == height and _has_video(fmt)]
+                filesizes = [fmt.get('filesize') or fmt.get('filesize_approx') for fmt in height_formats]
+                filesize = max((size for size in filesizes if size), default=None)
                 size_mb = filesize / (1024 * 1024) if filesize else None
-                too_large = size_mb and size_mb > MAX_FILE_SIZE_BYTES / (1024 * 1024)
-                
+                too_large = bool(size_mb and filesize > MAX_FILE_SIZE_BYTES)
                 if size_mb:
-                    size_str = f"{size_mb/1024:.1f} ГБ" if size_mb >= 1024 else f"{size_mb:.1f} МБ"
+                    size_str = f"{size_mb / 1024:.1f} ГБ" if size_mb >= 1024 else f"{size_mb:.1f} МБ"
                 else:
                     size_str = "⌛"
-                
-                # Используем селектор загрузки: видео указанной высоты + лучшее аудио
-                dl_format = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
-                
+
+                width = max((fmt.get('width') or 0 for fmt in height_formats), default=0)
                 formats_list.append({
-                    'format_id': dl_format,
+                    'format_id': _build_download_format(height),
                     'height': height,
                     'width': width,
                     'ext': 'mp4',
-                    'quality_label': quality_label,
+                    'quality_label': quality_label(height),
                     'size_str': size_str,
                     'filesize': filesize,
                     'too_large': too_large,
-                    'has_audio': True,
-                    'url': fmt.get('url'),
-                    'format_note': fmt.get('format_note', '')
+                    'has_audio': any(_has_audio(fmt) for fmt in height_formats),
+                    'url': url,
+                    'format_note': 'Best up to selected height'
                 })
-            
-            formats_list.sort(key=lambda x: x['height'], reverse=True)
-            filtered_formats = [f for f in formats_list if not f['too_large'] or f['filesize'] is None]
-            
+
+            filtered_formats = [fmt for fmt in formats_list if not fmt['too_large']]
             if not filtered_formats and formats_list:
                 filtered_formats = [formats_list[-1]]
-            
-            # Если по какой-то причине список пуст, даем стандартный выбор best
+
             if not filtered_formats:
+                fallback_height = info.get('height') or 720
                 filtered_formats = [{
-                    'format_id': 'bestvideo+bestaudio/best',
-                    'height': 1080,
-                    'width': 1920,
+                    'format_id': _build_download_format(fallback_height),
+                    'height': fallback_height,
+                    'width': info.get('width') or 0,
                     'ext': 'mp4',
                     'quality_label': 'Лучшее качество',
                     'size_str': '⌛',
@@ -169,14 +196,14 @@ def get_video_formats(url: str) -> Dict:
                     'url': url,
                     'format_note': 'Best'
                 }]
-            
+
             result['formats'] = filtered_formats
             result['success'] = True
-            
+
     except Exception as e:
         logger.error(f"Error getting video formats: {e}")
-        result['error'] = str(e)
-    
+        result['error'] = _human_error(e)
+
     return result
 
 
@@ -203,18 +230,21 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     try:
         ydl_opts = {
             **get_anti_block_opts(),
-            'format': format_id,
+            'format': _resolve_download_format(format_id),
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'writethumbnail': True,
             'thumbnail_format': 'jpg',
-            'merge_output_format': 'mp4',
-            'postprocessors': [
-                {
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4',
-                }
-            ]
         }
+        if has_ffmpeg():
+            ydl_opts.update({
+                'merge_output_format': 'mp4',
+                'postprocessors': [
+                    {
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }
+                ]
+            })
         if FFMPEG_LOCATION:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
         
@@ -265,11 +295,7 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
             
     except Exception as e:
         logger.error(f"Download error: {e}")
-        error_str = str(e)
-        if "ffprobe and ffmpeg not found" in error_str or "ffmpeg not found" in error_str:
-            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env."
-        else:
-            result['error'] = error_str
+        result['error'] = _human_error(e)
     
     return result
 
@@ -411,11 +437,7 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
             
     except Exception as e:
         logger.error(f"Audio extraction error: {e}")
-        error_str = str(e)
-        if "ffprobe and ffmpeg not found" in error_str or "ffmpeg not found" in error_str:
-            result['error'] = "В системе не найдены утилиты FFmpeg и ffprobe. Пожалуйста, установите их или укажите путь в файле .env."
-        else:
-            result['error'] = error_str
+        result['error'] = _human_error(e)
     
     return result
 
