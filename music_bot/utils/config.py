@@ -1,5 +1,10 @@
 import os
 import shutil
+
+try:
+    import imageio_ffmpeg
+except ImportError:
+    imageio_ffmpeg = None
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +47,16 @@ def get_ffmpeg_location():
     if which_ffmpeg:
         return os.path.dirname(which_ffmpeg)
 
-    # 3. Популярные пути установки в Linux, macOS и Windows
+    # 3. Запасной бинарник из Python-пакета imageio-ffmpeg
+    if imageio_ffmpeg:
+        try:
+            bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            if bundled_ffmpeg and os.path.exists(bundled_ffmpeg):
+                return os.path.dirname(bundled_ffmpeg)
+        except Exception:
+            pass
+
+    # 4. Популярные пути установки в Linux, macOS и Windows
     common_paths = [
         "/usr/bin",
         "/usr/local/bin",
@@ -65,6 +79,15 @@ def get_ffmpeg_location():
 # Определяем путь к ffmpeg для yt-dlp
 FFMPEG_LOCATION = get_ffmpeg_location()
 
+def has_ffmpeg():
+    """Проверяет, доступен ли ffmpeg для склейки и конвертации медиа."""
+    if not FFMPEG_LOCATION:
+        return False
+    for exe in ["ffmpeg", "ffmpeg.exe"]:
+        if os.path.exists(os.path.join(FFMPEG_LOCATION, exe)):
+            return True
+    return bool(shutil.which("ffmpeg"))
+
 def get_anti_block_opts():
     """
     Возвращает единый набор настроек для yt-dlp, помогающий обойти блокировки YouTube 
@@ -85,6 +108,11 @@ def get_anti_block_opts():
         'quiet': True,
         'no_warnings': True,
     }
+    cookies_from_browser = os.getenv('COOKIES_FROM_BROWSER')
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
+    elif cookies_from_browser:
+        parts = [part.strip() for part in cookies_from_browser.split(':') if part.strip()]
+        if parts:
+            opts['cookiesfrombrowser'] = tuple(parts)
     return opts

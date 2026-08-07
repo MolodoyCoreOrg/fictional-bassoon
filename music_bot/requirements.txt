@@ -5,3 +5,4 @@ Pillow>=10.0.0
 yt-dlp
 python-dotenv>=1.0.0
 ffmpeg-python>=0.2.0
+imageio-ffmpeg>=0.5.1
