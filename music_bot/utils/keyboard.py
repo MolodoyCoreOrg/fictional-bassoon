@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+BOT_USERNAME = "GG_Loader_bot"
+
 def create_button(text: str, callback_data: str = None, url: str = None) -> InlineKeyboardButton:
     if url:
         return InlineKeyboardButton(text=text, url=url)
@@ -73,3 +75,11 @@ def get_skip_channel_keyboard() -> InlineKeyboardMarkup:
         [create_button("⬅️ Назад в меню", callback_data="back_to_menu")]
     ]
     return create_keyboard(buttons)
+
+
+def get_inline_album_keyboard(album_title: str, album_key: str) -> InlineKeyboardMarkup:
+    """Кнопка под inline-аудио, которая открывает альбом в личном чате с ботом."""
+    safe_title = album_title.strip() or "Альбом"
+    return create_keyboard([
+        [create_button(f"💿 {safe_title}", url=f"https://t.me/{BOT_USERNAME}?start=album_{album_key}")]
+    ])
