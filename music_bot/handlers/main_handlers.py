@@ -240,26 +240,47 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
             
             thumb_file = FSInputFile(result['thumbnail_path']) if result['thumbnail_path'] and os.path.exists(result['thumbnail_path']) else None
             
-            # Отправляем видео с правильными параметрами ширины, высоты и обложки, чтобы Telegram не превращал его в квадрат!
-            await callback.message.answer_video(
-                video=video_file,
-                caption=caption,
-                width=result.get('width', 1920),
-                height=result.get('height', 1080),
-                cover=thumb_file,
-                supports_streaming=True,
-                parse_mode="HTML"
-            )
+            # Сначала отправляем как video, чтобы Telegram показывал плеер. Если Bot API
+            # откажется принимать большой/нестандартный файл, пробуем отправить документом
+            # и показываем пользователю реальную причину вместо общего "непредвиденная ошибка".
+            try:
+                await callback.message.answer_video(
+                    video=video_file,
+                    caption=caption,
+                    width=result.get('width', 1920),
+                    height=result.get('height', 1080),
+                    cover=thumb_file,
+                    supports_streaming=True,
+                    parse_mode="HTML"
+                )
+            except Exception as send_video_error:
+                logger.warning(f"Video send failed, trying document fallback: {send_video_error}")
+                try:
+                    await callback.message.answer_document(
+                        document=FSInputFile(result['video_path']),
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                except Exception as send_document_error:
+                    logger.error(f"Document send failed: {send_document_error}")
+                    size_mb = (result.get('filesize') or os.path.getsize(result['video_path'])) / (1024 * 1024)
+                    await status_msg.edit_text(
+                        "❌ Telegram не принял файл для отправки.\n"
+                        f"Размер файла: {size_mb:.1f} МБ.\n"
+                        f"Причина: {html.escape(str(send_document_error))}\n\n"
+                        "Попробуйте качество ниже или настройте локальный Telegram Bot API/увеличенный лимит загрузки."
+                    )
+                    return
             await status_msg.delete()
             try:
                 await callback.message.delete()
-            except:
+            except Exception:
                 pass
         else:
             await status_msg.edit_text(f"❌ Ошибка при скачивании: {result['error']}")
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text("❌ Произошла непредвиденная ошибка при отправке.")
+        await status_msg.edit_text(f"❌ Произошла ошибка при отправке.\n{html.escape(str(e))}")
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()

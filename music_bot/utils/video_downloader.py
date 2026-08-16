@@ -13,8 +13,11 @@ from utils.config import FFMPEG_EXECUTABLE, FFMPEG_LOCATION, get_anti_block_opts
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Максимальный размер файла для Telegram (2 ГБ)
-MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+# Максимальный размер файла для отправки в Telegram.
+# По умолчанию рассчитано на локальный Bot API/увеличенные лимиты; для обычного
+# Bot API можно задать TELEGRAM_MAX_UPLOAD_MB=50, чтобы не показывать слишком
+# большие варианты как доступные для отправки.
+MAX_FILE_SIZE_BYTES = int(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "2000")) * 1024 * 1024
 
 # Поддерживаемые платформы
 SUPPORTED_PLATFORMS = [
@@ -29,6 +32,7 @@ SUPPORTED_PLATFORMS = [
 ]
 
 QUALITY_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+NORMALIZED_QUALITY_HEIGHTS = QUALITY_HEIGHTS
 
 
 def format_date(date_str: str) -> str:
@@ -70,6 +74,16 @@ def _build_download_format(height: int) -> str:
     return f"h{height}"
 
 
+def _normalize_height(height: Optional[int]) -> Optional[int]:
+    """Приводит нестандартные высоты площадок к понятным кнопкам 144p-1080p."""
+    if not height:
+        return None
+    for target in NORMALIZED_QUALITY_HEIGHTS:
+        if height >= target:
+            return target
+    return 144
+
+
 def _resolve_download_format(format_id: str) -> str:
     """
     Преобразует короткий маркер кнопки в селектор yt-dlp.
@@ -87,6 +101,7 @@ def _resolve_download_format(format_id: str) -> str:
         return (
             f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={height}]+bestaudio/"
+            f"best[height<={height}][vcodec!=none][acodec!=none]/"
             f"best[height<={height}]/best"
         )
     return f"best[height<={height}][vcodec!=none][acodec!=none]/best[height<={height}]/best"
@@ -99,6 +114,8 @@ def _human_error(error: Exception) -> str:
         return "В системе не найден FFmpeg. Установите ffmpeg или задайте FFMPEG_LOCATION в .env. Для Docker пересоберите образ; в requirements также добавлен imageio-ffmpeg как запасной вариант."
     if "instagram sent an empty media response" in lower or "without being logged-in" in lower:
         return "Instagram не отдал медиа без авторизации. Проверьте, что пост публичный; для приватных/ограниченных постов добавьте cookies.txt и укажите COOKIES_FILE в .env или настройте COOKIES_FROM_BROWSER."
+    if "sign in to confirm" in lower or "not a bot" in lower:
+        return "YouTube запросил подтверждение, что запрос не от бота. Экспортируйте cookies из браузера в cookies.txt рядом с bot.py или задайте COOKIES_FILE/COOKIES_FROM_BROWSER в .env, затем перезапустите бота."
     if "unsupported url" in lower:
         return "Площадка или формат ссылки не поддержаны текущей версией yt-dlp. Обновите yt-dlp и проверьте ссылку."
     return error_str
@@ -144,15 +161,21 @@ def get_video_formats(url: str) -> Dict:
                 available_heights = [info.get('height') or 720]
 
             formats_list = []
-            for target in QUALITY_HEIGHTS:
-                candidates = [height for height in available_heights if height and height <= target]
+            normalized_targets = sorted(
+                {_normalize_height(height) for height in available_heights if _normalize_height(height)},
+                reverse=True,
+            )
+            for target in normalized_targets:
+                if target not in QUALITY_HEIGHTS:
+                    continue
+                candidates = [height for height in available_heights if height and height >= target]
                 if not candidates:
                     continue
-                height = max(candidates)
-                if any(item['height'] == height for item in formats_list):
+                source_height = min(candidates)
+                if any(item['height'] == target for item in formats_list):
                     continue
 
-                height_formats = [fmt for fmt in formats if fmt.get('height') == height and _has_video(fmt)]
+                height_formats = [fmt for fmt in formats if fmt.get('height') and fmt.get('height') <= target and _has_video(fmt)]
                 filesizes = [fmt.get('filesize') or fmt.get('filesize_approx') for fmt in height_formats]
                 filesize = max((size for size in filesizes if size), default=None)
                 size_mb = filesize / (1024 * 1024) if filesize else None
@@ -164,17 +187,17 @@ def get_video_formats(url: str) -> Dict:
 
                 width = max((fmt.get('width') or 0 for fmt in height_formats), default=0)
                 formats_list.append({
-                    'format_id': _build_download_format(height),
-                    'height': height,
+                    'format_id': _build_download_format(target),
+                    'height': target,
                     'width': width,
                     'ext': 'mp4',
-                    'quality_label': quality_label(height),
+                    'quality_label': quality_label(target),
                     'size_str': size_str,
                     'filesize': filesize,
                     'too_large': too_large,
                     'has_audio': any(_has_audio(fmt) for fmt in height_formats),
                     'url': url,
-                    'format_note': 'Best up to selected height'
+                    'format_note': f'Best up to {target}p (source {source_height}p)'
                 })
 
             filtered_formats = [fmt for fmt in formats_list if not fmt['too_large']]
@@ -290,7 +313,21 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
                         result['video_path'] = os.path.join(temp_dir, file)
                         result['filesize'] = os.path.getsize(result['video_path'])
                         break
-            
+
+            if not result['video_path'] or not os.path.exists(result['video_path']):
+                result['error'] = "Видео было скачано, но итоговый файл не найден."
+                return result
+
+            if result['filesize'] > MAX_FILE_SIZE_BYTES:
+                max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+                size_mb = result['filesize'] / (1024 * 1024)
+                result['error'] = (
+                    f"Файл получился слишком большим для отправки через Telegram: "
+                    f"{size_mb:.1f} МБ при лимите {max_mb:.0f} МБ. "
+                    "Выберите качество ниже или увеличьте TELEGRAM_MAX_UPLOAD_MB при использовании локального Bot API."
+                )
+                return result
+
             result['success'] = True
             
     except Exception as e:
