@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import InlineQuery, InlineQueryResultArticle, InlineQueryResultAudio, InputTextMessageContent, CallbackQuery, FSInputFile
 from utils.music_downloader import search_music, download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 import hashlib
@@ -67,38 +67,26 @@ async def inline_search(inline_query: InlineQuery):
                 continue
 
             result_id = f"{idx}_{hashlib.md5(track_url.encode()).hexdigest()[:8]}"
-            cache_key = _cache_inline_track(track)
-
             duration = track.get('duration')
-            if duration:
-                minutes = int(duration // 60)
-                seconds = int(duration % 60)
-                duration_str = f"{minutes}:{seconds:02d}"
-            else:
-                duration_str = "🎵"
 
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📥 Скачать с обложкой", callback_data=f"dl:{cache_key}")]
-            ])
-
-            description_text = f"{duration_str} • {track['artist']}"
-
+            # В inline-режиме пользователь ожидает, что выбранный трек сразу
+            # попадёт в чат, без дополнительной кнопки под служебным сообщением.
+            # Поэтому отдаём результат как audio: Telegram сам вставит аудио в чат
+            # сразу после выбора строки в списке inline-результатов.
             results.append(
-                InlineQueryResultArticle(
+                InlineQueryResultAudio(
                     id=result_id,
+                    audio_url=track_url,
                     title=track['title'],
-                    description=description_text,
-                    input_message_content=InputTextMessageContent(
-                        message_text=f"🎵 <b>{html.escape(track['title'])}</b>\n"
-                                     f"👤 Исполнитель: <b>{html.escape(track['artist'])}</b>\n"
-                                     f"⏱ Длительность: {duration_str}\n\n"
-                                     f"👇 <i>Нажмите кнопку ниже, чтобы скачать трек в MP3 с обложкой и тегами:</i>",
-                        parse_mode="HTML"
+                    performer=track['artist'],
+                    audio_duration=int(duration) if duration else None,
+                    caption=(
+                        f"🎵 <b>{html.escape(track['title'])}</b>\n"
+                        f"👤 {html.escape(track['artist'])}\n\n"
+                        f"❤️ @GG_Loader_bot"
                     ),
-                    reply_markup=keyboard,
+                    parse_mode="HTML",
                     thumbnail_url=track.get('thumbnail') or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
-                    url=track_url,
-                    hide_url=True,
                 )
             )
 
