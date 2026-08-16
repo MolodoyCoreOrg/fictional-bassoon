@@ -90,7 +90,17 @@ sudo systemctl start gg_loader
 BOT_TOKEN="ваш_токен_от_BotFather"
 ADMINS="id1,id2,id3"  # ID администраторов (опционально)
 ENV="DEV"  # или PROD
+COOKIES_FILE="/app/cookies.txt"  # cookies для YouTube/Instagram/VK при антибот-проверках
+COOKIES_FROM_BROWSER="chrome"  # локально можно использовать cookies из браузера вместо файла
+TELEGRAM_MAX_UPLOAD_MB="2000"  # лимит отправки видео; для обычного Bot API укажите 50
 ```
+
+### Если YouTube пишет «Sign in to confirm you’re not a bot»
+
+Экспортируйте cookies из браузера в файл `cookies.txt`, положите его рядом с `bot.py`
+или передайте путь через `COOKIES_FILE`. После изменения cookies обязательно
+перезапустите бота. Без cookies YouTube может отдавать только часть форматов или
+полностью блокировать анализ ссылки.
 
 ### Получение токена
 
