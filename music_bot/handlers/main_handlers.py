@@ -23,6 +23,7 @@ from utils.video_downloader import (
 )
 from utils.music_downloader import download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from utils.album_cache import get_album
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -43,6 +44,13 @@ def extract_url(text: str) -> str:
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    command_parts = (message.text or "").split(maxsplit=1)
+    start_parameter = command_parts[1].strip() if len(command_parts) > 1 else ""
+
+    if start_parameter.startswith("album_"):
+        await send_cached_album(message, start_parameter.removeprefix("album_"))
+        return
+
     user_name = message.from_user.first_name
     
     welcome_text = (
@@ -58,6 +66,80 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     
     await message.answer(welcome_text, reply_markup=get_welcome_menu(), parse_mode="HTML")
+
+
+async def send_cached_album(message: Message, album_key: str):
+    """Sends every cached album track to the private chat in album order."""
+    album = get_album(album_key)
+    if not album:
+        await message.answer(
+            "❌ Данные альбома устарели. Вернитесь в чат, заново выберите трек через inline-поиск и нажмите кнопку альбома ещё раз."
+        )
+        return
+
+    tracks = album.get("tracks") or []
+    album_title = album.get("album") or "Альбом"
+    artist = album.get("artist") or "Неизвестно"
+    total = len(tracks)
+
+    if not tracks:
+        await message.answer("❌ В этом альбоме не удалось найти треки для загрузки.")
+        return
+
+    status_msg = await message.answer(
+        f"💿 <b>{html.escape(album_title)}</b> — нашёл {total} трек(ов).\n"
+        "Начинаю загружать по порядку альбома...",
+        parse_mode="HTML"
+    )
+
+    for index, track in enumerate(tracks, start=1):
+        user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+        os.makedirs(user_temp_dir, exist_ok=True)
+        try:
+            await status_msg.edit_text(
+                f"💿 <b>{html.escape(album_title)}</b>\n"
+                f"⏳ Загружаю {index}/{total}: {html.escape(track.get('title') or 'Неизвестно')}",
+                parse_mode="HTML"
+            )
+
+            result = await download_from_url(track.get("url"), user_temp_dir)
+            if not result["success"]:
+                await message.answer(
+                    f"⚠️ Не удалось загрузить {index}/{total}: {html.escape(track.get('title') or 'Неизвестно')}\n"
+                    f"Причина: {html.escape(result.get('error') or 'неизвестная ошибка')}",
+                    parse_mode="HTML"
+                )
+                continue
+
+            title = result.get("title") or track.get("title") or "Неизвестно"
+            performer = result.get("artist") or track.get("artist") or artist
+            audio_path = result["audio_path"]
+            cover_path = result.get("thumbnail_path")
+
+            if cover_path and os.path.exists(cover_path):
+                audio_path = await add_cover_to_mp3(audio_path, cover_path, title, performer)
+
+            caption = (
+                f"💿 <b>{html.escape(album_title)}</b>\n"
+                f"{index}/{total}. 🎵 {html.escape(title)}\n"
+                f"👤 {html.escape(performer)}\n\n"
+                f"❤️ @GG_Loader_bot"
+            )
+            await message.answer_audio(
+                audio=FSInputFile(audio_path),
+                title=title,
+                performer=performer,
+                caption=caption,
+                parse_mode="HTML",
+                thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None,
+            )
+        except Exception as e:
+            logger.error(f"Error sending album track {index}/{total}: {e}")
+            await message.answer(f"⚠️ Ошибка при загрузке трека {index}/{total}.")
+        finally:
+            await cleanup_temp_files(user_temp_dir)
+
+    await status_msg.edit_text(f"✅ Альбом <b>{html.escape(album_title)}</b> загружен.", parse_mode="HTML")
 
 @router.callback_query(F.data == "back_to_menu")
 @router.callback_query(F.data == "cancel_action")

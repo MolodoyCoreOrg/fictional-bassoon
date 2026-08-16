@@ -157,6 +157,72 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     return result
 
 
+def _normalize_album_track(entry: dict, fallback_artist: str = "Неизвестно") -> dict | None:
+    """Converts a yt-dlp playlist/search entry into the bot track schema."""
+    if not entry:
+        return None
+
+    video_id = entry.get('id', '')
+    url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url', '')
+    if video_id and (not url or not str(url).startswith('http')):
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        return None
+
+    raw_title = entry.get('title') or 'Неизвестно'
+    clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
+    artist = entry.get('artist') or entry.get('uploader') or fallback_artist
+
+    thumbnail = entry.get('thumbnail')
+    if not thumbnail and entry.get('thumbnails'):
+        thumbnails = entry.get('thumbnails', [])
+        if thumbnails:
+            thumbnail = thumbnails[-1].get('url')
+
+    return {
+        'title': clean_title or raw_title,
+        'artist': artist,
+        'url': url,
+        'duration': entry.get('duration'),
+        'thumbnail': thumbnail,
+        'track_number': entry.get('track_number') or entry.get('playlist_index'),
+    }
+
+
+async def get_album_tracks(album_url: str, fallback_artist: str = "Неизвестно", limit: int = 60) -> list:
+    """Loads album/playlist tracks in the original order when a source exposes an album URL."""
+    if not album_url:
+        return []
+
+    try:
+        ydl_opts = {
+            **get_anti_block_opts(),
+            'extract_flat': 'in_playlist',
+            'playlistend': limit,
+            'socket_timeout': 15,
+        }
+        if FFMPEG_LOCATION:
+            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_extract_info_sync, ydl, album_url, False),
+                timeout=20
+            )
+
+        entries = info.get('entries') if info else []
+        tracks = []
+        for entry in entries or []:
+            track = _normalize_album_track(entry, fallback_artist=fallback_artist)
+            if track:
+                tracks.append(track)
+
+        return tracks
+    except Exception as e:
+        logger.warning(f"Album tracks loading error for {album_url}: {e}")
+        return []
+
+
 async def search_music(query: str, limit: int = 10) -> list:
     """
     Ищет музыку по запросу через приоритетные источники в асинхронном режиме
@@ -210,14 +276,20 @@ async def search_music(query: str, limit: int = 10) -> list:
                             # Очищаем название для красоты
                             raw_title = entry.get('title', 'Неизвестно')
                             clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
+                            artist = entry.get('artist') or entry.get('uploader') or 'Неизвестно'
+                            album = entry.get('album') or entry.get('playlist')
+                            album_url = entry.get('album_url') or entry.get('playlist_url')
                             
                             results.append({
                                 'title': clean_title or raw_title,
-                                'artist': entry.get('uploader') or entry.get('artist', 'Неизвестно'),
+                                'artist': artist,
                                 'url': url,
                                 'duration': entry.get('duration'),
                                 'thumbnail': thumbnail,
-                                'source': prefix.replace('search', '')
+                                'source': prefix.replace('search', ''),
+                                'album': album,
+                                'album_url': album_url,
+                                'track_number': entry.get('track_number') or entry.get('playlist_index')
                             })
                     
                     logger.info(f"Found {len(results)} results from {prefix}")

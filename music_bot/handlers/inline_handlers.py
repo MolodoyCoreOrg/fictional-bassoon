@@ -1,7 +1,9 @@
 from aiogram import Router, F
 from aiogram.types import InlineQuery, InlineQueryResultArticle, InlineQueryResultAudio, InputTextMessageContent, CallbackQuery, FSInputFile
-from utils.music_downloader import search_music, download_from_url
+from utils.music_downloader import search_music, download_from_url, get_album_tracks
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from utils.album_cache import cache_album
+from utils.keyboard import get_inline_album_keyboard
 import hashlib
 import os
 import uuid
@@ -73,6 +75,21 @@ async def inline_search(inline_query: InlineQuery):
             # попадёт в чат, без дополнительной кнопки под служебным сообщением.
             # Поэтому отдаём результат как audio: Telegram сам вставит аудио в чат
             # сразу после выбора строки в списке inline-результатов.
+            reply_markup = None
+            album_title = track.get('album')
+            album_url = track.get('album_url')
+
+            if album_title and album_url:
+                album_tracks = await get_album_tracks(album_url, fallback_artist=track.get('artist') or 'Неизвестно')
+                if album_tracks:
+                    album_key = cache_album({
+                        'album': album_title,
+                        'artist': track.get('artist') or 'Неизвестно',
+                        'album_url': album_url,
+                        'tracks': album_tracks,
+                    })
+                    reply_markup = get_inline_album_keyboard(album_title, album_key)
+
             results.append(
                 InlineQueryResultAudio(
                     id=result_id,
@@ -87,6 +104,7 @@ async def inline_search(inline_query: InlineQuery):
                     ),
                     parse_mode="HTML",
                     thumbnail_url=track.get('thumbnail') or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+                    reply_markup=reply_markup,
                 )
             )
 
