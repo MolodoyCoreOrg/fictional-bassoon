@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
 from models.states import MediaStates
-from utils.config import TELEGRAM_LOCAL_API, TELEGRAM_MAX_UPLOAD_MB, TEMP_DIR
+from utils.config import FFMPEG_EXECUTABLE, TELEGRAM_LOCAL_API, TELEGRAM_MAX_UPLOAD_MB, TEMP_DIR
 from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard,
@@ -409,6 +409,118 @@ async def handle_audio_link(message: Message, state: FSMContext):
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
+
+
+
+# --- ЗАГРУЗКА ВИДЕО В ФОРМАТЕ КРУЖОЧКА ---
+
+@router.callback_query(F.data == "upload_video_note")
+async def process_upload_video_note(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.edit_text(
+        "⭕ <b>Загрузка видео кружочком</b>\n\n"
+        "Отправьте видео прямо в этот чат.\n\n"
+        "⚠️ <b>Важно:</b> видео должно быть <b>квадратным</b> и длиться "
+        "<b>не более 1 минуты</b>. Иначе Telegram не позволит сделать из него кружочек.\n\n"
+        "Отправляйте ролик именно как видео, а не как файл.",
+        reply_markup=get_back_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(MediaStates.waiting_for_video_note)
+
+
+@router.message(StateFilter(MediaStates.waiting_for_video_note), F.video)
+async def handle_video_note_upload(message: Message, state: FSMContext):
+    video = message.video
+
+    if video.duration > 60:
+        await message.answer(
+            "❌ Видео длится больше 1 минуты. Telegram поддерживает кружочки "
+            "длительностью не более 60 секунд. Пришлите более короткое видео.",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    if video.width != video.height:
+        await message.answer(
+            f"❌ Видео должно быть квадратным. Сейчас размер: {video.width}×{video.height}. "
+            "Обрежьте ролик до формата 1:1 и отправьте его снова.",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    if not FFMPEG_EXECUTABLE:
+        await message.answer(
+            "❌ На сервере недоступен FFmpeg, поэтому сейчас подготовить кружочек не получится. "
+            "Сообщите администратору бота.",
+            reply_markup=get_back_keyboard()
+        )
+        await state.clear()
+        return
+
+    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+    os.makedirs(user_temp_dir, exist_ok=True)
+    input_path = os.path.join(user_temp_dir, f"input_{video.file_unique_id}.mp4")
+    output_path = os.path.join(user_temp_dir, "video_note.mp4")
+    status_msg = await message.answer("⏳ Готовлю видео-кружочек...")
+
+    try:
+        file = await message.bot.get_file(video.file_id)
+        await message.bot.download_file(file.file_path, input_path)
+
+        command = [
+            FFMPEG_EXECUTABLE,
+            "-y",
+            "-nostdin",
+            "-i", input_path,
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-vf", "scale=480:480,setsar=1",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "24",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-movflags", "+faststart",
+            "-t", "60",
+            output_path,
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0 or not os.path.exists(output_path):
+            error_text = stderr.decode("utf-8", errors="replace")[-2000:]
+            logger.error("FFmpeg video note conversion failed: %s", error_text)
+            raise RuntimeError("Не удалось преобразовать видео в формат кружочка.")
+
+        await message.answer_video_note(
+            video_note=FSInputFile(output_path),
+            duration=video.duration,
+            length=480,
+        )
+        await status_msg.delete()
+    except Exception as e:
+        logger.exception("Error creating video note: %s", e)
+        await status_msg.edit_text(
+            "❌ Не удалось сделать кружочек из этого видео. "
+            "Проверьте, что ролик квадратный, длится не более минуты и попробуйте снова."
+        )
+    finally:
+        await cleanup_temp_files(user_temp_dir)
+        await state.clear()
+
+
+@router.message(StateFilter(MediaStates.waiting_for_video_note))
+async def handle_invalid_video_note_upload(message: Message):
+    await message.answer(
+        "❌ Отправьте квадратный ролик длительностью не более 1 минуты именно как видео.",
+        reply_markup=get_back_keyboard()
+    )
 
 
 # --- 3. ИЗВЛЕЧЕНИЕ АУДИО ИЗ ВИДЕО ---

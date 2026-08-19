@@ -18,3 +18,4 @@ class MediaStates(StatesGroup):
     waiting_for_cover = State()
     waiting_for_track_info = State()
     waiting_for_channel_link = State()
+    waiting_for_video_note = State()

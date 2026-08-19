@@ -16,6 +16,7 @@ def get_welcome_menu() -> InlineKeyboardMarkup:
         [create_button("ℹ️ О ГУЧИГЕНГОВО", callback_data="about_guchi")],
         [create_button("🖼 Загрузить обложку для аудио", callback_data="upload_cover")],
         [create_button("🎥 Скачать видео из соцсетей", callback_data="download_video")],
+        [create_button("⭕ Загрузить видео кружочком", callback_data="upload_video_note")],
         [create_button("🎵 Загрузить аудио по ссылке", callback_data="download_audio")],
         [create_button("🔊 Извлечь аудио из видео", callback_data="extract_audio")]
     ]
