@@ -16,6 +16,27 @@ SEARCH_SOURCES = [
 ]
 
 
+def _is_http_url(value) -> bool:
+    """Returns True for direct HTTP(S) media URLs accepted by Telegram."""
+    return isinstance(value, str) and value.startswith(('https://', 'http://'))
+
+
+def _inline_thumbnail_url(entry: dict, source: str) -> str | None:
+    """Returns a stable JPEG thumbnail suitable for Telegram inline results."""
+    video_id = entry.get('id')
+    if source.startswith('yt') and video_id:
+        # yt-dlp may select a WebP thumbnail. Telegram inline audio thumbnails
+        # are most reliable as JPEG, so use YouTube's stable JPEG endpoint.
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+    thumbnail = entry.get('thumbnail')
+    if not thumbnail and entry.get('thumbnails'):
+        thumbnails = entry.get('thumbnails', [])
+        if thumbnails:
+            thumbnail = thumbnails[-1].get('url')
+    return thumbnail if _is_http_url(thumbnail) else None
+
+
 def _extract_info_sync(ydl, url_or_query, download=False):
     """Синхронная функция для вызова yt-dlp в отдельном потоке"""
     return ydl.extract_info(url_or_query, download=download)
@@ -236,8 +257,11 @@ async def search_music(query: str, limit: int = 10) -> list:
         try:
             ydl_opts = {
                 **get_anti_block_opts(),
-                'format': 'bestaudio/best',
-                'extract_flat': 'in_playlist',
+                # Full extraction is required here: with extract_flat yt-dlp
+                # returns a webpage/video ID, not the direct audio file URL that
+                # Telegram needs for InlineQueryResultAudio.
+                'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
+                'extract_flat': False,
                 'noplaylist': True,
                 'socket_timeout': 10,
             }
@@ -257,21 +281,22 @@ async def search_music(query: str, limit: int = 10) -> list:
                 if info and 'entries' in info:
                     for entry in info['entries']:
                         if entry and len(results) < limit:
-                            thumbnail = entry.get('thumbnail')
-                            if not thumbnail and entry.get('thumbnails'):
-                                thumbnails = entry.get('thumbnails', [])
-                                if thumbnails:
-                                    thumbnail = thumbnails[-1].get('url')
-                            
                             video_id = entry.get('id', '')
-                            url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url', '')
+                            source_url = entry.get('webpage_url') or entry.get('original_url') or ''
+                            if prefix.startswith('yt') and video_id and not _is_http_url(source_url):
+                                source_url = f"https://www.youtube.com/watch?v={video_id}"
+                            elif not source_url and video_id:
+                                source_url = f"https://www.youtube.com/watch?v={video_id}"
 
-                            if prefix.startswith('yt') and video_id and not str(url).startswith('http'):
-                                url = f"https://www.youtube.com/watch?v={video_id}"
-                            elif prefix.startswith('sc') and entry.get('webpage_url'):
-                                url = entry['webpage_url']
-                            elif not url and video_id:
-                                url = f"https://www.youtube.com/watch?v={video_id}"
+                            # With full extraction entry['url'] is the signed direct
+                            # media URL. Keep the webpage URL separately because it
+                            # remains the right input for later yt-dlp downloads.
+                            audio_url = entry.get('url') or ''
+                            if not _is_http_url(audio_url):
+                                logger.warning(f"Skipping {video_id}: no direct audio URL")
+                                continue
+
+                            thumbnail = _inline_thumbnail_url(entry, prefix)
                             
                             # Очищаем название для красоты
                             raw_title = entry.get('title', 'Неизвестно')
@@ -283,7 +308,8 @@ async def search_music(query: str, limit: int = 10) -> list:
                             results.append({
                                 'title': clean_title or raw_title,
                                 'artist': artist,
-                                'url': url,
+                                'url': source_url,
+                                'audio_url': audio_url,
                                 'duration': entry.get('duration'),
                                 'thumbnail': thumbnail,
                                 'source': prefix.replace('search', ''),
