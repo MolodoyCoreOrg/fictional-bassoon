@@ -185,3 +185,28 @@ MIT License
 
 ---
 **Создано для объединения ГУЧИГЕНГОВО** 🎵
+
+### Видео больше 50 МБ и актуальная авторизация YouTube
+
+Облачный Bot API принимает загружаемые ботом видео и документы только до 50 МБ.
+Для файлов до 2000 МБ запустите собственный `telegram-bot-api` с `--local`
+и настройте:
+
+```env
+TELEGRAM_API_BASE_URL="http://127.0.0.1:8081"
+TELEGRAM_LOCAL_FILE_MODE="false"
+TELEGRAM_MAX_UPLOAD_MB="2000"
+```
+
+Для YouTube используйте свежий Netscape `cookies.txt` через `COOKIES_FILE`.
+Если серверный IP требует Proof-of-Origin token:
+
+```env
+YTDLP_JS_RUNTIME="node"
+YOUTUBE_PLAYER_CLIENT="mweb"
+YOUTUBE_PO_TOKEN="mweb.gvs+ВАШ_PO_TOKEN"
+```
+
+Без `TELEGRAM_API_BASE_URL` бот автоматически применяет облачный лимит 50 МБ;
+с локальным API — 2000 МБ.
+

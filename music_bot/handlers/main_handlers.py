@@ -3,6 +3,7 @@ import uuid
 import logging
 import html
 import re
+import asyncio
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
@@ -11,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
 from models.states import MediaStates
-from utils.config import TEMP_DIR
+from utils.config import TELEGRAM_LOCAL_API, TELEGRAM_MAX_UPLOAD_MB, TEMP_DIR
 from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard,
@@ -185,7 +186,7 @@ async def handle_video_link(message: Message, state: FSMContext):
     # Кэшируем ссылку сразу, чтобы она точно не потерялась
     await state.update_data(video_url=url, extract_url=url)
     
-    formats_result = get_video_formats(url)
+    formats_result = await asyncio.to_thread(get_video_formats, url)
     if not formats_result['success'] or not formats_result['formats']:
         await msg.edit_text(f"❌ Ошибка или форматы не найдены.\n{formats_result.get('error', '')}")
         await state.clear()
@@ -221,7 +222,7 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         return
 
     await callback.answer()
-    status_msg = await callback.message.answer("⏳ Загружаю видео в максимальном качестве... Пожалуйста, подождите.")
+    status_msg = await callback.message.answer("⏳ Загружаю видео в выбранном качестве... Пожалуйста, подождите.")
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -264,11 +265,19 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                 except Exception as send_document_error:
                     logger.error(f"Document send failed: {send_document_error}")
                     size_mb = (result.get('filesize') or os.path.getsize(result['video_path'])) / (1024 * 1024)
+                    api_hint = (
+                        "Проверьте TELEGRAM_API_BASE_URL и запуск telegram-bot-api с --local."
+                        if TELEGRAM_LOCAL_API
+                        else
+                        "Сейчас используется облачный Bot API с лимитом 50 МБ. "
+                        "Для файлов до 2000 МБ задайте TELEGRAM_API_BASE_URL локального "
+                        "telegram-bot-api, запущенного с --local."
+                    )
                     await status_msg.edit_text(
                         "❌ Telegram не принял файл для отправки.\n"
                         f"Размер файла: {size_mb:.1f} МБ.\n"
                         f"Причина: {html.escape(str(send_document_error))}\n\n"
-                        "Попробуйте качество ниже или настройте локальный Telegram Bot API/увеличенный лимит загрузки."
+                        f"Настроенный лимит: {TELEGRAM_MAX_UPLOAD_MB} МБ. {api_hint}"
                     )
                     return
             await status_msg.delete()

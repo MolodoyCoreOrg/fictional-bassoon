@@ -1,9 +1,18 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from handlers.main_handlers import router as main_router
 from handlers.inline_handlers import router as inline_router
-from utils.config import BOT_TOKEN, TEMP_DIR, FFMPEG_LOCATION
+from utils.config import (
+    BOT_TOKEN,
+    FFMPEG_LOCATION,
+    TELEGRAM_API_BASE_URL,
+    TELEGRAM_LOCAL_FILE_MODE,
+    TELEGRAM_MAX_UPLOAD_MB,
+    TEMP_DIR,
+)
 import logging
 import os
 
@@ -17,6 +26,11 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 async def on_startup(bot: Bot):
     """Вызывается при запуске бота"""
     logging.info("Бот запущен!")
+    logging.info(
+        "Telegram Bot API: %s, лимит загрузки: %s МБ",
+        TELEGRAM_API_BASE_URL or "https://api.telegram.org",
+        TELEGRAM_MAX_UPLOAD_MB,
+    )
     
     if FFMPEG_LOCATION:
         logging.info(f"✅ FFmpeg успешно обнаружен по пути: {FFMPEG_LOCATION}")
@@ -60,9 +74,18 @@ def create_dispatcher():
 
 async def run_bot():
     """Запуск бота"""
+    session = None
+    if TELEGRAM_API_BASE_URL:
+        api_server = TelegramAPIServer.from_base(
+            TELEGRAM_API_BASE_URL,
+            is_local=TELEGRAM_LOCAL_FILE_MODE,
+        )
+        session = AiohttpSession(api=api_server)
+
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session,
     )
     
     dp = create_dispatcher()

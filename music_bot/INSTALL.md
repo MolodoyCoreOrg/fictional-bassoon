@@ -6,7 +6,7 @@
 - Придумайте имя и username
 - Сохраните токен вида: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
 
-**Ваш токен:** `8635732122:AAFltEPy2-CjI-p3o1RM5V013pJyhjbBQRo`
+**Токен:** получите у @BotFather и храните только в `.env`. Раскрытый токен немедленно отзовите.
 **Username:** `@GG_Loader_bot`
 
 ---
@@ -15,7 +15,7 @@
 В этом проекте токены хранятся в файле `.env`:
 
 ```env
-BOT_TOKEN="8635732122:AAFltEPy2-CjI-p3o1RM5V013pJyhjbBQRo"
+BOT_TOKEN="новый_токен_от_BotFather"
 ADMINS="id1,id2,id3"
 ENV="DEV"
 ```

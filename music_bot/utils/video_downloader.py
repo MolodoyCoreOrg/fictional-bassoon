@@ -8,7 +8,14 @@ import subprocess
 import shutil
 import uuid
 from typing import Dict, Optional
-from utils.config import FFMPEG_EXECUTABLE, FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
+from utils.config import (
+    COOKIES_FILE,
+    FFMPEG_EXECUTABLE,
+    FFMPEG_LOCATION,
+    TELEGRAM_MAX_UPLOAD_MB,
+    get_anti_block_opts,
+    has_ffmpeg,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,7 +24,7 @@ logger = logging.getLogger(__name__)
 # По умолчанию рассчитано на локальный Bot API/увеличенные лимиты; для обычного
 # Bot API можно задать TELEGRAM_MAX_UPLOAD_MB=50, чтобы не показывать слишком
 # большие варианты как доступные для отправки.
-MAX_FILE_SIZE_BYTES = int(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "2000")) * 1024 * 1024
+MAX_FILE_SIZE_BYTES = TELEGRAM_MAX_UPLOAD_MB * 1024 * 1024
 
 # Поддерживаемые платформы
 SUPPORTED_PLATFORMS = [
@@ -115,7 +122,17 @@ def _human_error(error: Exception) -> str:
     if "instagram sent an empty media response" in lower or "without being logged-in" in lower:
         return "Instagram не отдал медиа без авторизации. Проверьте, что пост публичный; для приватных/ограниченных постов добавьте cookies.txt и укажите COOKIES_FILE в .env или настройте COOKIES_FROM_BROWSER."
     if "sign in to confirm" in lower or "not a bot" in lower:
-        return "YouTube запросил подтверждение, что запрос не от бота. Экспортируйте cookies из браузера в cookies.txt рядом с bot.py или задайте COOKIES_FILE/COOKIES_FROM_BROWSER в .env, затем перезапустите бота."
+        if COOKIES_FILE or os.getenv("COOKIES_FROM_BROWSER"):
+            return (
+                "YouTube отклонил текущую авторизацию. Обновите cookies из отдельного "
+                "приватного окна. Для серверного IP может понадобиться PO-token: "
+                "YOUTUBE_PLAYER_CLIENT=mweb и YOUTUBE_PO_TOKEN=mweb.gvs+<token>."
+            )
+        return (
+            "YouTube заблокировал неавторизованный IP бота. Добавьте свежий Netscape "
+            "cookies.txt через COOKIES_FILE. Для серверного IP также может понадобиться "
+            "YOUTUBE_PLAYER_CLIENT=mweb и YOUTUBE_PO_TOKEN=mweb.gvs+<token>."
+        )
     if "unsupported url" in lower:
         return "Площадка или формат ссылки не поддержаны текущей версией yt-dlp. Обновите yt-dlp и проверьте ссылку."
     return error_str
@@ -179,7 +196,7 @@ def get_video_formats(url: str) -> Dict:
                 filesizes = [fmt.get('filesize') or fmt.get('filesize_approx') for fmt in height_formats]
                 filesize = max((size for size in filesizes if size), default=None)
                 size_mb = filesize / (1024 * 1024) if filesize else None
-                too_large = bool(size_mb and filesize > MAX_FILE_SIZE_BYTES)
+                too_large = bool(filesize and filesize > MAX_FILE_SIZE_BYTES)
                 if size_mb:
                     size_str = f"{size_mb / 1024:.1f} ГБ" if size_mb >= 1024 else f"{size_mb:.1f} МБ"
                 else:

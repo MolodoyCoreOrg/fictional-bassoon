@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 
 try:
     import imageio_ffmpeg
@@ -9,8 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Токен бота от BotFather
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8635732122:AAFltEPy2-CjI-p3o1RM5V013pJyhjbBQRo")
+# Токен нельзя хранить в репозитории: публично раскрытый токен нужно отозвать.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("Не задан BOT_TOKEN в .env или переменных окружения")
 
 # ID админов (можно добавить свои)
 ADMINS = [int(id.strip()) for id in os.getenv("ADMINS", "").split(",") if id.strip()]
@@ -21,13 +24,45 @@ TEMP_DIR = os.path.join(os.path.dirname(__file__), "..", "temp")
 # Ссылка на ГУЧИГЕНГОВО
 GUCHI_LINK = "https://band.link/guchigengovo"
 
-# Путь к файлу cookies.txt для обхода блокировки YouTube ("Sign in to confirm you’re not a bot")
-COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(os.path.dirname(__file__), "..", "cookies.txt"))
-if not os.path.exists(COOKIES_FILE):
-    if os.path.exists("cookies.txt"):
-        COOKIES_FILE = "cookies.txt"
-    else:
-        COOKIES_FILE = None
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+# Облачный Bot API принимает загружаемые ботом файлы только до 50 МБ. Лимит
+# 2000 МБ доступен исключительно через собственный telegram-bot-api в --local.
+TELEGRAM_API_BASE_URL = os.getenv("TELEGRAM_API_BASE_URL", "").strip().rstrip("/") or None
+TELEGRAM_LOCAL_API = bool(TELEGRAM_API_BASE_URL)
+# Передача локального пути допустима только при общей ФС у бота и Bot API.
+TELEGRAM_LOCAL_FILE_MODE = os.getenv("TELEGRAM_LOCAL_FILE_MODE", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+_telegram_upload_limit = os.getenv("TELEGRAM_MAX_UPLOAD_MB", "").strip()
+TELEGRAM_MAX_UPLOAD_MB = int(
+    _telegram_upload_limit or ("2000" if TELEGRAM_LOCAL_API else "50")
+)
+if TELEGRAM_MAX_UPLOAD_MB < 1 or TELEGRAM_MAX_UPLOAD_MB > 2000:
+    raise ValueError("TELEGRAM_MAX_UPLOAD_MB должен быть в диапазоне 1..2000")
+if TELEGRAM_LOCAL_FILE_MODE and not TELEGRAM_LOCAL_API:
+    raise ValueError("TELEGRAM_LOCAL_FILE_MODE требует TELEGRAM_API_BASE_URL")
+
+
+def _find_cookies_file() -> str | None:
+    """Ищет cookies-файл независимо от текущей рабочей директории."""
+    configured = os.getenv("COOKIES_FILE") or os.getenv("YOUTUBE_COOKIES_FILE")
+    candidates = [
+        configured,
+        PROJECT_DIR / "cookies.txt",
+        PROJECT_DIR / "data" / "cookies.txt",
+        Path.cwd() / "cookies.txt",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(os.path.expandvars(os.path.expanduser(str(candidate)))).resolve()
+        if path.is_file():
+            return str(path)
+    return None
+
+
+COOKIES_FILE = _find_cookies_file()
 
 
 def _existing_executable(path: str) -> str | None:
@@ -191,30 +226,48 @@ def has_ffprobe():
     return bool(FFPROBE_EXECUTABLE)
 
 
-def get_anti_block_opts():
+def _split_env_list(name: str) -> list[str]:
+    return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
+
+
+def get_anti_block_opts(use_cookies: bool = True):
     """
-    Возвращает единый набор настроек для yt-dlp, помогающий обойти блокировки YouTube 
-    и других сервисов (ошибка Sign in to confirm you’re not a bot).
-    Автоматически подключает cookies.txt, если файл существует.
+    Возвращает актуальные настройки yt-dlp и подключает cookies/PO-token.
+    player_client и User-Agent не фиксируются: yt-dlp выбирает подходящий клиент.
     """
     opts = {
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'tv', 'web'],
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        },
+        'http_headers': {'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'},
         'nocheckcertificate': True,
         'quiet': True,
         'no_warnings': True,
+        'retries': 5,
+        'fragment_retries': 5,
     }
+
+    youtube_args = {}
+    player_clients = _split_env_list('YOUTUBE_PLAYER_CLIENT')
+    if player_clients:
+        youtube_args['player_client'] = player_clients
+    po_tokens = _split_env_list('YOUTUBE_PO_TOKEN')
+    if po_tokens:
+        youtube_args['po_token'] = po_tokens
+    visitor_data = os.getenv('YOUTUBE_VISITOR_DATA', '').strip()
+    if visitor_data:
+        youtube_args['visitor_data'] = [visitor_data]
+    if youtube_args:
+        opts['extractor_args'] = {'youtube': youtube_args}
+
+    js_runtime = os.getenv('YTDLP_JS_RUNTIME', '').strip()
+    if js_runtime:
+        opts['js_runtimes'] = {js_runtime: {}}
+    impersonate = os.getenv('YTDLP_IMPERSONATE', '').strip()
+    if impersonate:
+        opts['impersonate'] = impersonate
+
     cookies_from_browser = os.getenv('COOKIES_FROM_BROWSER')
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+    if use_cookies and COOKIES_FILE and os.path.exists(COOKIES_FILE):
         opts['cookiefile'] = COOKIES_FILE
-    elif cookies_from_browser:
+    elif use_cookies and cookies_from_browser:
         parts = [part.strip() for part in cookies_from_browser.split(':') if part.strip()]
         if parts:
             opts['cookiesfrombrowser'] = tuple(parts)
