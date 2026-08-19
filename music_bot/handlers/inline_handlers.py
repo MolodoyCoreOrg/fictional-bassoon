@@ -64,11 +64,15 @@ async def inline_search(inline_query: InlineQuery):
 
         results = []
         for idx, track in enumerate(search_results[:10]):
-            track_url = track.get('url') or ''
+            # Telegram accepts only a direct, publicly downloadable audio file URL
+            # in InlineQueryResultAudio. A YouTube/SoundCloud page URL causes the
+            # client to fail with a red exclamation mark after selecting a result.
+            track_url = track.get('audio_url') or ''
+            source_url = track.get('url') or track_url
             if not track_url:
                 continue
 
-            result_id = f"{idx}_{hashlib.md5(track_url.encode()).hexdigest()[:8]}"
+            result_id = f"{idx}_{hashlib.md5(source_url.encode()).hexdigest()[:8]}"
             duration = track.get('duration')
 
             # В inline-режиме пользователь ожидает, что выбранный трек сразу
@@ -103,7 +107,7 @@ async def inline_search(inline_query: InlineQuery):
                         f"❤️ @GG_Loader_bot"
                     ),
                     parse_mode="HTML",
-                    thumbnail_url=track.get('thumbnail') or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+                    thumbnail_url=track.get('thumbnail'),
                     reply_markup=reply_markup,
                 )
             )
