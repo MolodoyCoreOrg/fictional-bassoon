@@ -34,7 +34,7 @@ def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
     ]
     return create_keyboard(buttons)
 
-def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKeyboardMarkup:
+def get_video_quality_keyboard(url: str, formats: list, title: str, request_id: str = "") -> InlineKeyboardMarkup:
     """
     Генерирует сетку кнопок для выбора разрешений как на скриншоте
     (от 144p до 4K, по 3 кнопки в каждом ряду + кнопка Audio внизу)
@@ -45,7 +45,10 @@ def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKey
     for fmt in formats:
         quality_text = f"🎬 {fmt['quality_label']}"
             
-        callback_data = f"viddl_{fmt['format_id']}"
+        callback_data = (
+            f"viddl:{request_id}:{fmt['format_id']}"
+            if request_id else f"viddl_{fmt['format_id']}"
+        )
         current_row.append(create_button(quality_text, callback_data=callback_data))
         
         if len(current_row) == 3:
@@ -55,16 +58,18 @@ def get_video_quality_keyboard(url: str, formats: list, title: str) -> InlineKey
     if current_row:
         buttons.append(current_row)
     
-    buttons.append([create_button("🎵 Audio", callback_data="vid_audio_extract")])
+    audio_callback = f"vid_audio:{request_id}" if request_id else "vid_audio_extract"
+    buttons.append([create_button("🎵 Audio", callback_data=audio_callback)])
     buttons.append([create_button("⬅️ Назад в меню", callback_data="back_to_menu")])
     
     return create_keyboard(buttons)
 
-def get_extract_format_keyboard() -> InlineKeyboardMarkup:
+def get_extract_format_keyboard(request_id: str = "") -> InlineKeyboardMarkup:
     """Клавиатура выбора формата при извлечении аудио из видео (MP3 или Voice)"""
+    suffix = f":{request_id}" if request_id else ""
     buttons = [
-        [create_button("🎶 MP3 файл (с обложкой и тегами)", callback_data="ext_fmt_mp3")],
-        [create_button("🎙 Голосовое сообщение (Voice / OGG)", callback_data="ext_fmt_voice")],
+        [create_button("🎶 MP3 файл (с обложкой и тегами)", callback_data=f"ext_fmt_mp3{suffix}")],
+        [create_button("🎙 Голосовое сообщение (Voice / OGG)", callback_data=f"ext_fmt_voice{suffix}")],
         [create_button("⬅️ Назад в меню", callback_data="back_to_menu")]
     ]
     return create_keyboard(buttons)

@@ -25,6 +25,7 @@ from utils.video_downloader import (
 from utils.music_downloader import download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import get_album
+from utils.media_request_cache import get_media_request, save_media_request
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -38,7 +39,32 @@ def extract_url(text: str) -> str:
     if not text:
         return ""
     match = re.search(r'https?://[^\s]+', text)
-    return match.group(0) if match else text.strip()
+    return match.group(0).rstrip('.,;!?)]}>"\'') if match else text.strip()
+
+
+def is_audio_url(url: str) -> bool:
+    """Определяет ссылки на аудиоплощадки и прямые аудиофайлы."""
+    if re.search(AUDIO_REGEX, url, re.IGNORECASE):
+        return True
+    clean_url = url.lower().split("?", 1)[0].split("#", 1)[0]
+    return clean_url.endswith((".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"))
+
+
+async def resolve_video_request(callback: CallbackQuery, state: FSMContext, request_id: str | None) -> str:
+    """Возвращает URL, привязанный именно к нажатой клавиатуре."""
+    media_request = get_media_request(request_id)
+    if media_request:
+        return media_request.url
+
+    # URL дублируется в сообщении с кнопками: это позволяет старым кнопкам
+    # пережить очистку FSM и даже перезапуск процесса бота.
+    message_text = callback.message.caption or callback.message.text or ""
+    message_urls = re.findall(r"https?://[^\s]+", message_text, re.IGNORECASE)
+    if message_urls:
+        return message_urls[-1].rstrip('.,;!?)]}>"\'')
+
+    user_data = await state.get_data()
+    return user_data.get("video_url") or user_data.get("extract_url") or ""
 
 # --- ОБЩИЕ КОМАНДЫ ---
 
@@ -178,13 +204,17 @@ async def process_download_video(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MediaStates.waiting_for_video_link)
 
 @router.message(StateFilter(MediaStates.waiting_for_video_link), F.text.regexp(r'https?://[^\s]+'))
-@router.message(F.text.regexp(VIDEO_REGEX))
 async def handle_video_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
     msg = await message.answer("⏳ Анализирую ссылку и ищу доступные форматы...")
     
-    # Кэшируем ссылку сразу, чтобы она точно не потерялась
-    await state.update_data(video_url=url, extract_url=url)
+    # FSM остаётся запасным вариантом для старых сообщений без request_id.
+    await state.update_data(
+        video_url=url,
+        extract_url=url,
+        local_video_path=None,
+        local_temp_dir=None,
+    )
     
     formats_result = await asyncio.to_thread(get_video_formats, url)
     if not formats_result['success'] or not formats_result['formats']:
@@ -192,9 +222,17 @@ async def handle_video_link(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    keyboard = get_video_quality_keyboard(url, formats_result['formats'], formats_result['title'])
+    request_id = save_media_request(url, formats_result['title'])
+    keyboard = get_video_quality_keyboard(
+        url, formats_result['formats'], formats_result['title'], request_id=request_id
+    )
     
-    info_text = f"🍿 <b>{html.escape(formats_result['title'])}</b>"
+    info_text = (
+        f"🍿 <b>{html.escape(formats_result['title'])}</b>\n"
+        f"🔗 <code>{html.escape(url)}</code>\n\n"
+        "Выберите качество. Кнопки останутся активными — можно скачать несколько вариантов."
+    )
+    await state.set_state(None)
     
     if formats_result.get('thumbnail'):
         try:
@@ -212,13 +250,17 @@ async def handle_video_link(message: Message, state: FSMContext):
     await msg.edit_text(info_text, reply_markup=keyboard, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("viddl_"))
+@router.callback_query(F.data.startswith("viddl:"))
 async def download_selected_video(callback: CallbackQuery, state: FSMContext):
-    format_id = callback.data.split("_", 1)[1]
-    user_data = await state.get_data()
-    video_url = user_data.get("video_url")
+    if callback.data.startswith("viddl:"):
+        _, request_id, format_id = callback.data.split(":", 2)
+    else:
+        request_id = None
+        format_id = callback.data.split("_", 1)[1]
+    video_url = await resolve_video_request(callback, state, request_id)
     
     if not video_url:
-        await callback.answer("❌ Ошибка: ссылка потеряна. Отправьте её заново в чат.", show_alert=True)
+        await callback.answer("❌ Не удалось прочитать ссылку из сообщения с кнопками.", show_alert=True)
         return
 
     await callback.answer()
@@ -281,10 +323,6 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                     )
                     return
             await status_msg.delete()
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
         else:
             await status_msg.edit_text(f"❌ Ошибка при скачивании: {result['error']}")
     except Exception as e:
@@ -292,29 +330,27 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         await status_msg.edit_text(f"❌ Произошла ошибка при отправке.\n{html.escape(str(e))}")
     finally:
         await cleanup_temp_files(user_temp_dir)
-        await state.clear()
 
 @router.callback_query(F.data == "vid_audio_extract")
+@router.callback_query(F.data.startswith("vid_audio:"))
 async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки «🎵 Audio» прямо из меню выбора разрешения видео"""
-    user_data = await state.get_data()
-    video_url = user_data.get("video_url")
+    request_id = callback.data.partition(":")[2] or None
+    video_url = await resolve_video_request(callback, state, request_id)
     
     if not video_url:
-        await callback.answer("❌ Ошибка: ссылка потеряна. Пришлите её еще раз.", show_alert=True)
+        await callback.answer("❌ Не удалось прочитать ссылку из сообщения с кнопками.", show_alert=True)
         return
 
     await callback.answer()
-    await state.update_data(extract_url=video_url)
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"🍿 Видео: <code>{html.escape(video_url)}</code>\n\n"
         "🎵 <b>В каком формате вы хотите получить аудиодорожку?</b>\n\n"
         "• <b>MP3</b> — музыкальный трек с обложкой и тегами.\n"
         "• <b>Голосовое сообщение</b> — аудиосообщение для быстрой прослушки и пересылки.",
-        reply_markup=get_extract_format_keyboard(),
+        reply_markup=get_extract_format_keyboard(request_id=request_id or ""),
         parse_mode="HTML"
     )
-    await state.set_state(MediaStates.waiting_for_extract_format)
 
 
 # --- 2. СКАЧИВАНИЕ АУДИО ПО ССЫЛКЕ ---
@@ -328,7 +364,6 @@ async def process_download_audio(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MediaStates.waiting_for_audio_link)
 
 @router.message(StateFilter(MediaStates.waiting_for_audio_link), F.text.regexp(r'https?://[^\s]+'))
-@router.message(F.text.regexp(AUDIO_REGEX))
 async def handle_audio_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
     msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...")
@@ -451,12 +486,22 @@ async def handle_video_file_for_audio(message: Message, state: FSMContext):
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
 
+@router.callback_query(F.data.startswith("ext_fmt_mp3:"))
+@router.callback_query(F.data.startswith("ext_fmt_voice:"))
 @router.callback_query(StateFilter(MediaStates.waiting_for_extract_format, None), F.data.in_({"ext_fmt_mp3", "ext_fmt_voice"}))
 async def process_extract_format_selection(callback: CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
-    url = user_data.get("extract_url") or user_data.get("video_url")
+    request_id = callback.data.partition(":")[2] or None
+    url = await resolve_video_request(callback, state, request_id) if request_id else (
+        user_data.get("extract_url") or user_data.get("video_url")
+    )
     local_video_path = user_data.get("local_video_path")
     local_temp_dir = user_data.get("local_temp_dir")
+    if request_id:
+        # Callback с request_id всегда относится к удалённой ссылке конкретной
+        # клавиатуры и не должен случайно использовать старый локальный файл из FSM.
+        local_video_path = None
+        local_temp_dir = None
     
     if not url and not local_video_path:
         await callback.answer("❌ Ошибка: ссылка или файл потеряны. Отправьте видео заново.", show_alert=True)
@@ -464,7 +509,7 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
         return
 
     await callback.answer()
-    is_voice = (callback.data == "ext_fmt_voice")
+    is_voice = callback.data.startswith("ext_fmt_voice")
     fmt_name = "голосовое сообщение" if is_voice else "MP3 файл"
     
     status_msg = await callback.message.answer(f"⏳ Извлекаю аудио как {fmt_name}... Пожалуйста, подождите.")
@@ -521,10 +566,11 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
                 )
             
             await status_msg.delete()
-            try:
-                await callback.message.delete()
-            except:
-                pass
+            if not request_id:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
         else:
             await status_msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
     except Exception as e:
@@ -532,7 +578,8 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
         await status_msg.edit_text("❌ Произошла непредвиденная ошибка при обработке.")
     finally:
         await cleanup_temp_files(user_temp_dir)
-        await state.clear()
+        if not request_id:
+            await state.clear()
 
 
 # --- 4. НАЛОЖЕНИЕ КАСТОМНОЙ ОБЛОЖКИ ---
@@ -648,3 +695,13 @@ async def process_final_audio(message: Message, state: FSMContext, channel_link:
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
+
+
+@router.message(StateFilter(None), F.text.regexp(r'https?://[^\s]+'))
+async def handle_direct_media_link(message: Message, state: FSMContext):
+    """Обрабатывает ссылку, отправленную напрямую, без выбора пункта меню."""
+    url = extract_url(message.text)
+    if is_audio_url(url):
+        await handle_audio_link(message, state)
+    else:
+        await handle_video_link(message, state)
