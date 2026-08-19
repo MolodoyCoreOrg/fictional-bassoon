@@ -7,7 +7,7 @@ import asyncio
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
-from utils.config import FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
+from utils.config import COOKIES_FILE, FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -160,6 +160,30 @@ def _split_catalog_title(label: str | None, description: str | None, host: str) 
     return title, artist
 
 
+def _cookies_for_url(url: str) -> dict:
+    """Reads only Netscape cookies whose domain matches the requested page."""
+    if not COOKIES_FILE or not os.path.isfile(COOKIES_FILE):
+        return {}
+
+    host = _url_host(url)
+    cookies = {}
+    try:
+        with open(COOKIES_FILE, encoding='utf-8', errors='ignore') as cookie_file:
+            for line in cookie_file:
+                if not line.strip() or line.lstrip().startswith('#'):
+                    continue
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) != 7:
+                    continue
+                domain, _, _, _, _, name, value = fields
+                cookie_domain = domain.lstrip('.').lower()
+                if host == cookie_domain or host.endswith(f'.{cookie_domain}'):
+                    cookies[name] = value
+    except OSError as error:
+        logger.warning(f'Не удалось прочитать cookies-файл: {error}')
+    return cookies
+
+
 async def _fetch_page_metadata(url: str) -> dict:
     """Loads public catalogue metadata used to find an accessible audio source."""
     headers = {
@@ -179,9 +203,21 @@ async def _fetch_page_metadata(url: str) -> dict:
             except Exception as error:
                 logger.info(f'Spotify oEmbed metadata unavailable: {error}')
 
-        async with session.get(url, allow_redirects=True) as response:
-            response.raise_for_status()
-            parser.feed(await response.text(errors='ignore'))
+        page_headers = {}
+        page_cookies = _cookies_for_url(url)
+        if page_cookies:
+            page_headers['Cookie'] = '; '.join(
+                f'{name}={value}' for name, value in page_cookies.items()
+            )
+        try:
+            async with session.get(url, allow_redirects=True, headers=page_headers) as response:
+                response.raise_for_status()
+                parser.feed(await response.text(errors='ignore'))
+        except Exception:
+            # Spotify oEmbed is an official metadata endpoint and is sufficient
+            # when the public HTML page rejects server-side requests.
+            if not extra.get('title'):
+                raise
 
     label = (
         parser.metadata.get('og:title')
@@ -387,6 +423,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             result['error'] = error_text
 
     return result
+
 
 def _normalize_album_track(entry: dict, fallback_artist: str = "Неизвестно") -> dict | None:
     """Converts a yt-dlp playlist/search entry into the bot track schema."""
