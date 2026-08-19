@@ -8,7 +8,10 @@ except ImportError:
     imageio_ffmpeg = None
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+# systemd может запускать процесс из произвольного WorkingDirectory, поэтому
+# загружаем .env относительно каталога приложения, а не текущего каталога.
+load_dotenv(dotenv_path=PROJECT_DIR / ".env")
 
 # Токен нельзя хранить в репозитории: публично раскрытый токен нужно отозвать.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -23,8 +26,6 @@ TEMP_DIR = os.path.join(os.path.dirname(__file__), "..", "temp")
 
 # Ссылка на ГУЧИГЕНГОВО
 GUCHI_LINK = "https://band.link/guchigengovo"
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # Облачный Bot API принимает загружаемые ботом файлы только до 50 МБ. Лимит
 # 2000 МБ доступен исключительно через собственный telegram-bot-api в --local.
