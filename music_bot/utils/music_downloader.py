@@ -170,7 +170,12 @@ def _cookies_for_url(url: str) -> dict:
     try:
         with open(COOKIES_FILE, encoding='utf-8', errors='ignore') as cookie_file:
             for line in cookie_file:
-                if not line.strip() or line.lstrip().startswith('#'):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if line.startswith('#HttpOnly_'):
+                    line = line[len('#HttpOnly_'):]
+                elif line.lstrip().startswith('#'):
                     continue
                 fields = line.rstrip('\n').split('\t')
                 if len(fields) != 7:
