@@ -22,7 +22,7 @@ from utils.video_downloader import (
     get_video_formats, download_video, download_audio_from_video, 
     detect_platform, extract_audio_from_local_video
 )
-from utils.music_downloader import download_from_url
+from utils.music_downloader import download_from_url, get_album_tracks
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import get_album
 from utils.media_request_cache import get_media_request, save_media_request
@@ -107,16 +107,34 @@ async def send_cached_album(message: Message, album_key: str):
     tracks = album.get("tracks") or []
     album_title = album.get("album") or "Альбом"
     artist = album.get("artist") or "Неизвестно"
-    total = len(tracks)
-
-    if not tracks:
-        await message.answer("❌ В этом альбоме не удалось найти треки для загрузки.")
-        return
 
     status_msg = await message.answer(
+        f"💿 <b>{html.escape(album_title)}</b>\n"
+        "⏳ Получаю состав альбома...",
+        parse_mode="HTML",
+    )
+
+    # Состав альбома загружается только после перехода по deep-link. Раньше
+    # каждый альбом извлекался прямо во время inline-поиска и Telegram не
+    # успевал получить результаты.
+    if not tracks and album.get("album_url"):
+        tracks = await get_album_tracks(
+            album["album_url"],
+            fallback_artist=artist,
+        )
+        album["tracks"] = tracks
+
+    if not tracks:
+        await status_msg.edit_text(
+            "❌ В этом альбоме не удалось найти треки для загрузки."
+        )
+        return
+
+    total = len(tracks)
+    await status_msg.edit_text(
         f"💿 <b>{html.escape(album_title)}</b> — нашёл {total} трек(ов).\n"
         "Начинаю загружать по порядку альбома...",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
 
     for index, track in enumerate(tracks, start=1):
