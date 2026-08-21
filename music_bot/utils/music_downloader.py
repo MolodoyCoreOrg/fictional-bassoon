@@ -283,7 +283,10 @@ async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
         try:
             # Only YouTube benefits from the shared authentication settings.
             use_cookies = target.startswith('ytsearch')
-            return await _download_info(target, temp_dir, use_cookies=use_cookies)
+            info = await _download_info(target, temp_dir, use_cookies=use_cookies)
+            if not info:
+                raise ValueError('источник не вернул данные о треке')
+            return info
         except Exception as error:
             source = target.partition('search')[0]
             logger.warning('Catalog match failed in %s: %s', source, error)

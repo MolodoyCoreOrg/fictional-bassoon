@@ -43,7 +43,9 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_download(target, temp_dir, use_cookies):
             calls.append((target, use_cookies))
-            if len(calls) < 3:
+            if len(calls) == 1:
+                return {}
+            if len(calls) == 2:
                 raise TypeError("source unavailable")
 
             audio_path = os.path.join(temp_dir, "matched.mp3")
