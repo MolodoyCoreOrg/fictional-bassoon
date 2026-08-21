@@ -283,6 +283,7 @@ async def process_inline_download(callback: CallbackQuery, bot: Bot):
                     title=title,
                     performer=artist,
                     thumb=thumb_file,
+                    disable_notification=True,
                 )
             except Exception as error:
                 logger.warning("Cannot stage inline audio for user %s: %s", callback.from_user.id, error)
