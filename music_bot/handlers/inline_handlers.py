@@ -3,7 +3,7 @@ from aiogram.types import (
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,
 )
-from utils.music_downloader import search_music, download_from_url
+from utils.music_downloader import search_music, download_from_url, find_track_album
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import cache_album
 from utils.keyboard import get_inline_album_keyboard
@@ -217,6 +217,12 @@ async def process_inline_download(callback: CallbackQuery):
         reply_markup = None
         album_title = download_result.get("album") or track.get("album")
         album_url = download_result.get("album_url") or track.get("album_url")
+        if not (album_title and album_url):
+            album_metadata = await find_track_album(title, artist)
+            if album_metadata:
+                album_title = album_metadata["album"]
+                album_url = album_metadata["album_url"]
+
         if album_title and album_url:
             album_key = cache_album({
                 "album": album_title,
