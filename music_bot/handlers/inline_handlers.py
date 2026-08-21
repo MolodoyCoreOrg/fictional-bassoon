@@ -1,6 +1,6 @@
 from aiogram import Router, F
-from aiogram.types import InlineQuery, InlineQueryResultArticle, InlineQueryResultAudio, InputTextMessageContent, CallbackQuery, FSInputFile
-from utils.music_downloader import search_music, download_from_url, get_album_tracks
+from aiogram.types import (\n    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,\n    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,\n)
+from utils.music_downloader import search_music, download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import cache_album
 from utils.keyboard import get_inline_album_keyboard
@@ -34,10 +34,7 @@ def _cache_inline_track(track: dict) -> str:
 
 @router.inline_query()
 async def inline_search(inline_query: InlineQuery):
-    """
-    Обработка inline-запросов для поиска музыки.
-    Пользователь вводит @GG_Loader_bot название песни.
-    """
+    """Показывает быстрый список треков с обложками в inline-режиме."""
     query = inline_query.query.strip()
 
     if not query:
@@ -45,70 +42,68 @@ async def inline_search(inline_query: InlineQuery):
             InlineQueryResultArticle(
                 id="welcome_cloud",
                 title="Привет! 💙",
-                description="Просто напиши артиста или название песни, и я найду их!",
+                description="Напиши артиста или название песни, и я найду её.",
                 input_message_content=InputTextMessageContent(
-                    message_text="🎵 **Поиск музыки ГУЧИГЕНГОВО**\n\nЧтобы найти трек, напишите в любом чате:\n`@GG_Loader_bot название песни`",
-                    parse_mode="Markdown"
+                    message_text=(
+                        "🎵 <b>Поиск музыки ГУЧИГЕНГОВО</b>\n\n"
+                        "Чтобы найти трек, напишите в любом чате:\n"
+                        "<code>@GG_Loader_bot название песни</code>"
+                    ),
+                    parse_mode="HTML",
                 ),
                 thumbnail_url="https://cdn-icons-png.flaticon.com/512/1163/1163624.png",
             )
         ]
     else:
-        logger.info(f"Inline search query: {query}")
+        logger.info("Inline search query: %s", query)
         try:
+            # Inline-ответ должен быть быстрым: здесь получаем только метаданные.
+            # Сам файл скачивается после выбора результата.
             search_results = await search_music(query, limit=10)
-            logger.info(f"Found {len(search_results)} results for query: {query}")
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
+            logger.info("Found %s results for query: %s", len(search_results), query)
+        except Exception as error:
+            logger.exception("Inline search failed for %s: %s", query, error)
             search_results = []
 
         results = []
         for idx, track in enumerate(search_results[:10]):
-            # Telegram accepts only a direct, publicly downloadable audio file URL
-            # in InlineQueryResultAudio. A YouTube/SoundCloud page URL causes the
-            # client to fail with a red exclamation mark after selecting a result.
-            track_url = track.get('audio_url') or ''
-            source_url = track.get('url') or track_url
-            if not track_url:
+            source_url = track.get("url") or ""
+            if not source_url:
                 continue
 
+            cache_key = _cache_inline_track(track)
+            duration = track.get("duration")
+            if duration:
+                minutes, seconds = divmod(int(duration), 60)
+                duration_text = f"{minutes}:{seconds:02d}"
+            else:
+                duration_text = "🎵"
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📥 Загрузить песню",
+                    callback_data=f"dl:{cache_key}",
+                )
+            ]])
             result_id = f"{idx}_{hashlib.md5(source_url.encode()).hexdigest()[:8]}"
-            duration = track.get('duration')
-
-            # В inline-режиме пользователь ожидает, что выбранный трек сразу
-            # попадёт в чат, без дополнительной кнопки под служебным сообщением.
-            # Поэтому отдаём результат как audio: Telegram сам вставит аудио в чат
-            # сразу после выбора строки в списке inline-результатов.
-            reply_markup = None
-            album_title = track.get('album')
-            album_url = track.get('album_url')
-
-            if album_title and album_url:
-                album_tracks = await get_album_tracks(album_url, fallback_artist=track.get('artist') or 'Неизвестно')
-                if album_tracks:
-                    album_key = cache_album({
-                        'album': album_title,
-                        'artist': track.get('artist') or 'Неизвестно',
-                        'album_url': album_url,
-                        'tracks': album_tracks,
-                    })
-                    reply_markup = get_inline_album_keyboard(album_title, album_key)
 
             results.append(
-                InlineQueryResultAudio(
+                InlineQueryResultArticle(
                     id=result_id,
-                    audio_url=track_url,
-                    title=track['title'],
-                    performer=track['artist'],
-                    audio_duration=int(duration) if duration else None,
-                    caption=(
-                        f"🎵 <b>{html.escape(track['title'])}</b>\n"
-                        f"👤 {html.escape(track['artist'])}\n\n"
-                        f"❤️ @GG_Loader_bot"
+                    title=track.get("title") or "Неизвестно",
+                    description=f"{duration_text} • {track.get('artist') or 'Неизвестно'}",
+                    thumbnail_url=track.get("thumbnail")
+                    or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            f"🎵 <b>{html.escape(track.get('title') or 'Неизвестно')}</b>\n"
+                            f"👤 {html.escape(track.get('artist') or 'Неизвестно')}\n"
+                            f"⏱ {duration_text}\n\n"
+                            "Нажмите кнопку ниже, чтобы загрузить песню в чат."
+                        ),
+                        parse_mode="HTML",
                     ),
-                    parse_mode="HTML",
-                    thumbnail_url=track.get('thumbnail'),
-                    reply_markup=reply_markup,
+                    reply_markup=keyboard,
                 )
             )
 
@@ -119,20 +114,26 @@ async def inline_search(inline_query: InlineQuery):
                     title="❌ Ничего не найдено",
                     description=f"По запросу «{query}» треков нет. Попробуйте изменить запрос.",
                     input_message_content=InputTextMessageContent(
-                        message_text=f"❌ По запросу <b>«{html.escape(query)}»</b> ничего не найдено.\nПопробуйте написать название трека или автора иначе.",
-                        parse_mode="HTML"
+                        message_text=(
+                            f"❌ По запросу <b>«{html.escape(query)}»</b> ничего не найдено.\n"
+                            "Попробуйте написать название трека или автора иначе."
+                        ),
+                        parse_mode="HTML",
                     ),
                     thumbnail_url="https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
                 )
             ]
 
-    await inline_query.answer(
-        results,
-        cache_time=5,
-        is_personal=True,
-        switch_pm_text="Открыть личные сообщения 💬",
-        switch_pm_parameter="from_inline_search"
-    )
+    try:
+        await inline_query.answer(
+            results,
+            cache_time=5,
+            is_personal=True,
+            switch_pm_text="Открыть личные сообщения 💬",
+            switch_pm_parameter="from_inline_search",
+        )
+    except Exception as error:
+        logger.exception("Failed to answer inline query %s: %s", inline_query.id, error)
 
 
 async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
@@ -210,13 +211,26 @@ async def process_inline_download(callback: CallbackQuery):
             f"❤️ @GG_Loader_bot"
         )
 
+        reply_markup = None
+        album_title = download_result.get("album") or track.get("album")
+        album_url = download_result.get("album_url") or track.get("album_url")
+        if album_title and album_url:
+            album_key = cache_album({
+                "album": album_title,
+                "artist": artist,
+                "album_url": album_url,
+                "tracks": [],
+            })
+            reply_markup = get_inline_album_keyboard(album_title, album_key)
+
         await callback.message.answer_audio(
             audio=audio_file,
             title=title,
             performer=artist,
             caption=caption,
             parse_mode="HTML",
-            thumb=thumb_file
+            thumb=thumb_file,
+            reply_markup=reply_markup,
         )
 
         await status_msg.delete()
