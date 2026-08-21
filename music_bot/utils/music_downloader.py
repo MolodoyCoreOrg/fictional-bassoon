@@ -447,6 +447,77 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     return result
 
 
+async def find_track_album(title: str, artist: str) -> dict | None:
+    """Finds album metadata without blocking the inline search itself."""
+    if not title or not artist or artist == "Неизвестно":
+        return None
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        query = f'artist:"{artist}" track:"{title}"'
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://api.deezer.com/search",
+                params={"q": query, "limit": 5},
+            ) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+
+        candidates = payload.get("data") or []
+        if not candidates:
+            return None
+
+        def score(item: dict) -> int:
+            item_title = str(item.get("title") or "").casefold()
+            item_artist = str((item.get("artist") or {}).get("name") or "").casefold()
+            return int(item_title == title.casefold()) + int(item_artist == artist.casefold())
+
+        match = max(candidates, key=score)
+        album = match.get("album") or {}
+        album_id = album.get("id")
+        album_title = album.get("title")
+        if not album_id or not album_title:
+            return None
+
+        return {
+            "album": album_title,
+            "album_url": f"https://api.deezer.com/album/{album_id}/tracks?limit=100",
+        }
+    except Exception as error:
+        logger.info("Album lookup unavailable for %s - %s: %s", artist, title, error)
+        return None
+
+
+async def _get_deezer_album_tracks(
+    album_url: str,
+    fallback_artist: str,
+    limit: int,
+) -> list:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(album_url) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    tracks = []
+    for index, entry in enumerate((payload.get("data") or [])[:limit], start=1):
+        title = entry.get("title")
+        artist = (entry.get("artist") or {}).get("name") or fallback_artist
+        if not title:
+            continue
+        tracks.append({
+            "title": title,
+            "artist": artist,
+            # download_from_url accepts yt-dlp search targets as well as URLs.
+            "url": f"ytsearch1:{artist} - {title} audio",
+            "duration": entry.get("duration"),
+            "thumbnail": None,
+            "track_number": entry.get("track_position") or index,
+        })
+    return tracks
+
+
 def _normalize_album_track(entry: dict, fallback_artist: str = "Неизвестно") -> dict | None:
     """Converts a yt-dlp playlist/search entry into the bot track schema."""
     if not entry:
@@ -485,6 +556,13 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
         return []
 
     try:
+        if _url_host(album_url) == "api.deezer.com":
+            return await _get_deezer_album_tracks(
+                album_url,
+                fallback_artist=fallback_artist,
+                limit=limit,
+            )
+
         ydl_opts = {
             **get_anti_block_opts(),
             'extract_flat': 'in_playlist',
