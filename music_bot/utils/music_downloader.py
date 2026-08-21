@@ -474,6 +474,8 @@ async def find_track_album(title: str, artist: str) -> dict | None:
             return int(item_title == title.casefold()) + int(item_artist == artist.casefold())
 
         match = max(candidates, key=score)
+        if score(match) < 1:
+            return None
         album = match.get("album") or {}
         album_id = album.get("id")
         album_title = album.get("title")
