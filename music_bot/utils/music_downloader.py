@@ -331,6 +331,8 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         'title': None,
         'artist': None,
         'thumbnail_path': None,
+        'album': None,
+        'album_url': None,
         'error': None,
     }
 
@@ -385,6 +387,21 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         result['title'] = clean_title or raw_title
         result['artist'] = raw_artist
 
+        # Album metadata is resolved only after the user chooses a result. This
+        # keeps inline search fast while still allowing an album deep-link on
+        # the audio message.
+        result['album'] = info.get('album')
+        result['album_url'] = info.get('album_url')
+        if result['album'] and not result['album_url']:
+            playlist_url = info.get('playlist_url')
+            playlist_title = info.get('playlist_title') or info.get('playlist')
+            if (
+                _is_http_url(playlist_url)
+                and playlist_title
+                and str(playlist_title).strip().lower() == str(result['album']).strip().lower()
+            ):
+                result['album_url'] = playlist_url
+
         audio_id = info.get('id', 'track')
         expected_path = os.path.join(temp_dir, f'{audio_id}.mp3')
         if os.path.exists(expected_path):
@@ -430,6 +447,79 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     return result
 
 
+async def find_track_album(title: str, artist: str) -> dict | None:
+    """Finds album metadata without blocking the inline search itself."""
+    if not title or not artist or artist == "Неизвестно":
+        return None
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        query = f'artist:"{artist}" track:"{title}"'
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://api.deezer.com/search",
+                params={"q": query, "limit": 5},
+            ) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+
+        candidates = payload.get("data") or []
+        if not candidates:
+            return None
+
+        def score(item: dict) -> int:
+            item_title = str(item.get("title") or "").casefold()
+            item_artist = str((item.get("artist") or {}).get("name") or "").casefold()
+            return int(item_title == title.casefold()) + int(item_artist == artist.casefold())
+
+        match = max(candidates, key=score)
+        if score(match) < 1:
+            return None
+        album = match.get("album") or {}
+        album_id = album.get("id")
+        album_title = album.get("title")
+        if not album_id or not album_title:
+            return None
+
+        return {
+            "album": album_title,
+            "album_url": f"https://api.deezer.com/album/{album_id}/tracks?limit=100",
+        }
+    except Exception as error:
+        logger.info("Album lookup unavailable for %s - %s: %s", artist, title, error)
+        return None
+
+
+async def _get_deezer_album_tracks(
+    album_url: str,
+    fallback_artist: str,
+    limit: int,
+) -> list:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(album_url) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    tracks = []
+    for index, entry in enumerate((payload.get("data") or [])[:limit], start=1):
+        title = entry.get("title")
+        artist = (entry.get("artist") or {}).get("name") or fallback_artist
+        if not title:
+            continue
+        tracks.append({
+            "title": title,
+            "artist": artist,
+            # download_from_url accepts yt-dlp search targets as well as URLs.
+            "url": f"ytsearch1:{artist} - {title} audio",
+            "duration": entry.get("duration"),
+            "thumbnail": None,
+            "track_number": entry.get("track_position") or index,
+        })
+    return tracks
+
+
 def _normalize_album_track(entry: dict, fallback_artist: str = "Неизвестно") -> dict | None:
     """Converts a yt-dlp playlist/search entry into the bot track schema."""
     if not entry:
@@ -468,6 +558,13 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
         return []
 
     try:
+        if _url_host(album_url) == "api.deezer.com":
+            return await _get_deezer_album_tracks(
+                album_url,
+                fallback_artist=fallback_artist,
+                limit=limit,
+            )
+
         ydl_opts = {
             **get_anti_block_opts(),
             'extract_flat': 'in_playlist',
@@ -496,85 +593,81 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
         return []
 
 
+async def _search_source(prefix: str, query: str, limit: int) -> list:
+    """Returns lightweight search entries without resolving media streams."""
+    ydl_opts = {
+        **get_anti_block_opts(),
+        'extract_flat': 'in_playlist',
+        'playlistend': limit,
+        'noplaylist': True,
+        'socket_timeout': 6,
+        'quiet': True,
+    }
+    if FFMPEG_LOCATION:
+        ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+
+    search_query = f"{prefix}{limit}:{query}"
+    logger.info("Searching metadata in %s: %s", prefix, search_query)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = await asyncio.wait_for(
+            asyncio.to_thread(_extract_info_sync, ydl, search_query, False),
+            timeout=8,
+        )
+    return (info or {}).get('entries') or []
+
+
 async def search_music(query: str, limit: int = 10) -> list:
-    """
-    Ищет музыку по запросу через приоритетные источники в асинхронном режиме
-    """
+    """Searches track metadata quickly enough for Telegram inline queries."""
+    if not query.strip() or limit < 1:
+        return []
+
+    batches = await asyncio.gather(
+        *(_search_source(prefix, query, limit) for prefix in SEARCH_SOURCES),
+        return_exceptions=True,
+    )
+
     results = []
-    
-    for prefix in SEARCH_SOURCES:
+    seen_urls = set()
+    for prefix, entries in zip(SEARCH_SOURCES, batches):
+        if isinstance(entries, Exception):
+            logger.warning("Search error in %s: %s", prefix, entries)
+            continue
+
+        for entry in entries:
+            if not entry or len(results) >= limit:
+                break
+
+            video_id = entry.get('id', '')
+            source_url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url') or ''
+            if prefix.startswith('yt') and video_id and not _is_http_url(source_url):
+                source_url = f"https://www.youtube.com/watch?v={video_id}"
+            if not _is_http_url(source_url) or source_url in seen_urls:
+                continue
+            seen_urls.add(source_url)
+
+            raw_title = entry.get('title') or 'Неизвестно'
+            clean_title = re.sub(
+                r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live).*?[\)\]]',
+                '',
+                raw_title,
+                flags=re.IGNORECASE,
+            ).strip()
+            artist = entry.get('artist') or entry.get('uploader') or entry.get('channel') or 'Неизвестно'
+
+            results.append({
+                'title': clean_title or raw_title,
+                'artist': artist,
+                'url': source_url,
+                'duration': entry.get('duration'),
+                'thumbnail': _inline_thumbnail_url(entry, prefix),
+                'source': prefix.replace('search', ''),
+                'album': entry.get('album'),
+                'album_url': entry.get('album_url'),
+                'track_number': entry.get('track_number') or entry.get('playlist_index'),
+            })
+
         if len(results) >= limit:
             break
-            
-        try:
-            ydl_opts = {
-                **get_anti_block_opts(),
-                # Full extraction is required here: with extract_flat yt-dlp
-                # returns a webpage/video ID, not the direct audio file URL that
-                # Telegram needs for InlineQueryResultAudio.
-                'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
-                'extract_flat': False,
-                'noplaylist': True,
-                'socket_timeout': 10,
-            }
-            if FFMPEG_LOCATION:
-                ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
-            
-            search_query = f"{prefix}{limit}:{query}"
-            logger.info(f"Searching in {prefix}: {search_query}")
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Асинхронный вызов поиска в отдельном потоке
-                info = await asyncio.wait_for(
-                    asyncio.to_thread(_extract_info_sync, ydl, search_query, False),
-                    timeout=12
-                )
-                
-                if info and 'entries' in info:
-                    for entry in info['entries']:
-                        if entry and len(results) < limit:
-                            video_id = entry.get('id', '')
-                            source_url = entry.get('webpage_url') or entry.get('original_url') or ''
-                            if prefix.startswith('yt') and video_id and not _is_http_url(source_url):
-                                source_url = f"https://www.youtube.com/watch?v={video_id}"
-                            elif not source_url and video_id:
-                                source_url = f"https://www.youtube.com/watch?v={video_id}"
 
-                            # With full extraction entry['url'] is the signed direct
-                            # media URL. Keep the webpage URL separately because it
-                            # remains the right input for later yt-dlp downloads.
-                            audio_url = entry.get('url') or ''
-                            if not _is_http_url(audio_url):
-                                logger.warning(f"Skipping {video_id}: no direct audio URL")
-                                continue
-
-                            thumbnail = _inline_thumbnail_url(entry, prefix)
-                            
-                            # Очищаем название для красоты
-                            raw_title = entry.get('title', 'Неизвестно')
-                            clean_title = re.sub(r'\s*[\(\[]\s*(Official|Music|Lyric|Video|Audio|HD|4K|HQ|Visualizer|Live).*?[\)\]]', '', raw_title, flags=re.IGNORECASE).strip()
-                            artist = entry.get('artist') or entry.get('uploader') or 'Неизвестно'
-                            album = entry.get('album') or entry.get('playlist')
-                            album_url = entry.get('album_url') or entry.get('playlist_url')
-                            
-                            results.append({
-                                'title': clean_title or raw_title,
-                                'artist': artist,
-                                'url': source_url,
-                                'audio_url': audio_url,
-                                'duration': entry.get('duration'),
-                                'thumbnail': thumbnail,
-                                'source': prefix.replace('search', ''),
-                                'album': album,
-                                'album_url': album_url,
-                                'track_number': entry.get('track_number') or entry.get('playlist_index')
-                            })
-                    
-                    logger.info(f"Found {len(results)} results from {prefix}")
-                        
-        except Exception as e:
-            logger.warning(f"Search error in {prefix}: {e}")
-            continue
-    
-    logger.info(f"Total found {len(results)} results for query: {query}")
+    logger.info("Total found %s results for query: %s", len(results), query)
     return results
