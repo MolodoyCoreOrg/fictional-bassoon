@@ -1,7 +1,7 @@
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import (
     InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, InputMediaAudio, FSInputFile,
 )
 from utils.music_downloader import search_music, download_from_url, find_track_album
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
@@ -157,64 +157,96 @@ async def download_thumbnail(thumbnail_url: str, temp_dir: str) -> str:
     return None
 
 
-@router.callback_query(F.data.startswith("dl:"))
-async def process_inline_download(callback: CallbackQuery):
-    """Обработка кнопки скачивания трека из inline-режима."""
-    await callback.answer("⏳ Скачиваю трек с обложкой...")
+async def _report_download_error(callback: CallbackQuery, bot: Bot, text: str):
+    """Shows an error for both ordinary and inline-origin callback queries."""
+    if callback.message:
+        await callback.message.answer(text)
+    elif callback.inline_message_id:
+        await bot.edit_message_text(
+            inline_message_id=callback.inline_message_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Открыть бота",
+                    url="https://t.me/GG_Loader_bot?start=from_inline_search",
+                )
+            ]]),
+        )
 
+
+@router.callback_query(F.data.startswith("dl:"))
+async def process_inline_download(callback: CallbackQuery, bot: Bot):
+    """Downloads the selected track and replaces the inline card with its audio."""
     cache_key = callback.data.split(":", 1)[1]
     track = INLINE_TRACK_CACHE.get(cache_key)
     if not track:
-        await callback.message.answer("❌ Данные трека устарели. Выполните inline-поиск заново и нажмите кнопку скачивания ещё раз.")
+        await callback.answer(
+            "Данные устарели. Выполните inline-поиск заново.",
+            show_alert=True,
+        )
         return
 
-    title = track.get('title') or 'Неизвестно'
-    artist = track.get('artist') or 'Неизвестно'
-    url = track.get('url')
-    thumbnail_url = track.get('thumbnail') or ''
-
+    await callback.answer("⏳ Загружаю песню...")
+    title = track.get("title") or "Неизвестно"
+    artist = track.get("artist") or "Неизвестно"
+    url = track.get("url")
+    thumbnail_url = track.get("thumbnail") or ""
     if not url:
-        await callback.message.answer("❌ Ошибка: ссылка трека не найдена")
+        await _report_download_error(callback, bot, "❌ Ссылка трека не найдена.")
         return
 
     user_temp_dir = os.path.join("/tmp/music_bot", str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
+    status_msg = None
+    storage_message = None
 
     try:
-        status_msg = await callback.message.answer("🎵 Скачиваю аудио и обложку в лучшем качестве...")
-        download_result = await download_from_url(url, user_temp_dir)
+        if callback.message:
+            status_msg = await callback.message.answer(
+                "🎵 Скачиваю аудио и обложку в лучшем качестве..."
+            )
 
-        if not download_result['success']:
-            await status_msg.edit_text(f"❌ Ошибка при скачивании: {download_result['error']}")
-            await cleanup_temp_files(user_temp_dir)
+        download_result = await download_from_url(url, user_temp_dir)
+        if not download_result["success"]:
+            error_text = html.escape(download_result.get("error") or "неизвестная ошибка")
+            if status_msg:
+                await status_msg.edit_text(f"❌ Ошибка при скачивании: {error_text}")
+            else:
+                await _report_download_error(
+                    callback,
+                    bot,
+                    f"❌ Ошибка при скачивании: {error_text}",
+                )
             return
 
-        audio_path = download_result['audio_path']
+        title = download_result.get("title") or title
+        artist = download_result.get("artist") or artist
+        audio_path = download_result["audio_path"]
 
         cover_path = None
         if thumbnail_url:
             cover_path = await download_thumbnail(thumbnail_url, user_temp_dir)
-
-        if not cover_path and download_result.get('thumbnail_path'):
-            cover_path = download_result['thumbnail_path']
+        if not cover_path and download_result.get("thumbnail_path"):
+            cover_path = download_result["thumbnail_path"]
 
         if cover_path and os.path.exists(cover_path):
-            processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
+            processed_path = await add_cover_to_mp3(
+                audio_path,
+                cover_path,
+                title,
+                artist,
+            )
         else:
             processed_path = audio_path
-
-        audio_file = FSInputFile(processed_path)
-        thumb_file = FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None
 
         current_date = datetime.now().strftime("%d/%m/%Y")
         caption = (
             f"🎵 <b>{html.escape(title)}</b>\n"
             f"👤 {html.escape(artist)}\n"
             f"📅 {current_date}\n\n"
-            f"❤️ @GG_Loader_bot"
+            "❤️ @GG_Loader_bot"
         )
 
-        reply_markup = None
         album_title = download_result.get("album") or track.get("album")
         album_url = download_result.get("album_url") or track.get("album_url")
         if not (album_title and album_url):
@@ -223,6 +255,7 @@ async def process_inline_download(callback: CallbackQuery):
                 album_title = album_metadata["album"]
                 album_url = album_metadata["album_url"]
 
+        reply_markup = None
         if album_title and album_url:
             album_key = cache_album({
                 "album": album_title,
@@ -232,20 +265,72 @@ async def process_inline_download(callback: CallbackQuery):
             })
             reply_markup = get_inline_album_keyboard(album_title, album_key)
 
-        await callback.message.answer_audio(
-            audio=audio_file,
-            title=title,
-            performer=artist,
-            caption=caption,
-            parse_mode="HTML",
-            thumb=thumb_file,
-            reply_markup=reply_markup,
+        audio_file = FSInputFile(processed_path)
+        thumb_file = (
+            FSInputFile(cover_path)
+            if cover_path and os.path.exists(cover_path)
+            else None
         )
 
-        await status_msg.delete()
+        if callback.inline_message_id:
+            # Inline callback queries do not contain chat_id/message. Upload the
+            # prepared MP3 briefly to the user's private bot chat to obtain a
+            # reusable Telegram file_id, then replace the inline card in-place.
+            try:
+                storage_message = await bot.send_audio(
+                    chat_id=callback.from_user.id,
+                    audio=audio_file,
+                    title=title,
+                    performer=artist,
+                    thumb=thumb_file,
+                )
+            except Exception as error:
+                logger.warning("Cannot stage inline audio for user %s: %s", callback.from_user.id, error)
+                await _report_download_error(
+                    callback,
+                    bot,
+                    "❌ Сначала откройте личный чат с ботом и нажмите Start, "
+                    "затем повторите inline-поиск.",
+                )
+                return
 
-    except Exception as e:
-        logger.error(f"Error in inline download: {e}")
-        await callback.message.answer(f"❌ Произошла ошибка: {str(e)}")
+            await bot.edit_message_media(
+                inline_message_id=callback.inline_message_id,
+                media=InputMediaAudio(
+                    media=storage_message.audio.file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                ),
+                reply_markup=reply_markup,
+            )
+        elif callback.message:
+            await callback.message.answer_audio(
+                audio=audio_file,
+                title=title,
+                performer=artist,
+                caption=caption,
+                parse_mode="HTML",
+                thumb=thumb_file,
+                reply_markup=reply_markup,
+            )
+
+        if status_msg:
+            await status_msg.delete()
+
+    except Exception as error:
+        logger.exception("Error in inline download: %s", error)
+        await _report_download_error(
+            callback,
+            bot,
+            f"❌ Произошла ошибка: {html.escape(str(error))}",
+        )
     finally:
+        if storage_message:
+            try:
+                await bot.delete_message(
+                    chat_id=storage_message.chat.id,
+                    message_id=storage_message.message_id,
+                )
+            except Exception:
+                pass
         await cleanup_temp_files(user_temp_dir)
