@@ -6,7 +6,7 @@ import logging
 import asyncio
 from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from utils.config import COOKIES_FILE, FFMPEG_LOCATION, get_anti_block_opts, has_ffmpeg
 
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +54,9 @@ def _inline_thumbnail_url(entry: dict, source: str) -> str | None:
 def _extract_info_sync(ydl, url_or_query, download=False):
     """Синхронная функция для вызова yt-dlp в отдельном потоке"""
     return ydl.extract_info(url_or_query, download=download)
+
+
+CATALOG_SEARCH_SCHEME = 'catalogsearch'
 
 
 CATALOG_HOSTS = {
@@ -107,6 +110,20 @@ def _is_vk_audio_url(url: str) -> bool:
 def _is_catalog_reference(url: str) -> bool:
     """True for catalogue pages that do not expose their original media file."""
     return _url_host(url) in CATALOG_HOSTS or _is_vk_audio_url(url)
+
+
+def _catalog_search_url(title: str, artist: str) -> str:
+    return f'{CATALOG_SEARCH_SCHEME}:?{urlencode({"title": title, "artist": artist})}'
+
+
+def _catalog_search_metadata(url: str) -> dict | None:
+    parsed = urlparse(url)
+    if parsed.scheme != CATALOG_SEARCH_SCHEME:
+        return None
+    params = parse_qs(parsed.query)
+    title = _clean_metadata_value((params.get('title') or [None])[0])
+    artist = _clean_metadata_value((params.get('artist') or [None])[0])
+    return {'title': title, 'artist': artist, 'thumbnail': None} if title else None
 
 
 def _uses_site_cookies(url: str) -> bool:
@@ -375,7 +392,11 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
 
     metadata = {}
     try:
-        if _is_catalog_reference(url) and not _url_host(url).startswith('music.yandex.'):
+        internal_metadata = _catalog_search_metadata(url)
+        if internal_metadata:
+            metadata = internal_metadata
+            info = await _download_catalog_match(metadata, temp_dir)
+        elif _is_catalog_reference(url) and not _url_host(url).startswith('music.yandex.'):
             metadata = await _resolve_catalog_metadata(url)
             info = await _download_catalog_match(metadata, temp_dir)
         else:
@@ -547,8 +568,8 @@ async def _get_deezer_album_tracks(
         tracks.append({
             "title": title,
             "artist": artist,
-            # download_from_url accepts yt-dlp search targets as well as URLs.
-            "url": f"ytsearch1:{artist} - {title} audio",
+            # Resolve through the configured catalogue source chain at download time.
+            "url": _catalog_search_url(title, artist),
             "duration": entry.get("duration"),
             "thumbnail": None,
             "track_number": entry.get("track_position") or index,

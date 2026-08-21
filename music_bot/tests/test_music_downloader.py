@@ -29,6 +29,17 @@ class CatalogueMetadataTests(unittest.TestCase):
         self.assertEqual(title, "Track Name")
         self.assertEqual(artist, "Artist Name")
 
+    def test_catalog_search_url_round_trips_unicode_metadata(self):
+        url = music_downloader._catalog_search_url("Трек & ремикс", "Артист")
+        self.assertEqual(
+            music_downloader._catalog_search_metadata(url),
+            {
+                "title": "Трек & ремикс",
+                "artist": "Артист",
+                "thumbnail": None,
+            },
+        )
+
     def test_yandex_does_not_receive_shared_cookies(self):
         self.assertFalse(
             music_downloader._uses_site_cookies(
