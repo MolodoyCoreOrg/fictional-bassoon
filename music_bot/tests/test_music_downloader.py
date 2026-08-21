@@ -38,13 +38,13 @@ class CatalogueMetadataTests(unittest.TestCase):
 
 
 class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_yandex_bool_error_falls_back_to_catalogue_search(self):
+    async def test_yandex_bool_error_falls_back_across_catalogue_sources(self):
         calls = []
 
         async def fake_download(target, temp_dir, use_cookies):
             calls.append((target, use_cookies))
-            if len(calls) == 1:
-                raise TypeError("argument of type 'bool' is not iterable")
+            if len(calls) < 3:
+                raise TypeError("source unavailable")
 
             audio_path = os.path.join(temp_dir, "matched.mp3")
             with open(audio_path, "wb") as audio_file:
@@ -68,6 +68,7 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
                     "_resolve_catalog_metadata",
                     AsyncMock(return_value=metadata),
                 ),
+                patch.object(music_downloader, "SEARCH_SOURCES", ("scsearch", "ytsearch")),
                 patch.object(
                     music_downloader,
                     "_download_info",
@@ -88,7 +89,18 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["title"], "Track Name")
         self.assertEqual(result["artist"], "Artist Name")
         self.assertFalse(calls[0][1])
-        self.assertTrue(calls[1][0].startswith("ytsearch1:Artist Name - Track Name"))
+        self.assertTrue(calls[1][0].startswith("scsearch1:Artist Name - Track Name"))
+        self.assertFalse(calls[1][1])
+        self.assertTrue(calls[2][0].startswith("ytsearch1:Artist Name - Track Name"))
+        self.assertTrue(calls[2][1])
+
+    def test_soundcloud_is_the_default_catalogue_source(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AUDIO_SEARCH_SOURCES", None)
+            self.assertEqual(
+                music_downloader._configured_search_sources(),
+                ("scsearch", "ytsearch"),
+            )
 
 
 if __name__ == "__main__":

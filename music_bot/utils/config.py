@@ -255,8 +255,15 @@ def get_anti_block_opts(use_cookies: bool = True):
     visitor_data = os.getenv('YOUTUBE_VISITOR_DATA', '').strip()
     if visitor_data:
         youtube_args['visitor_data'] = [visitor_data]
+    extractor_args = {}
     if youtube_args:
-        opts['extractor_args'] = {'youtube': youtube_args}
+        extractor_args['youtube'] = youtube_args
+
+    pot_provider_url = os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip().rstrip('/')
+    if pot_provider_url:
+        extractor_args['youtubepot-bgutilhttp'] = {'base_url': [pot_provider_url]}
+    if extractor_args:
+        opts['extractor_args'] = extractor_args
 
     js_runtime = os.getenv('YTDLP_JS_RUNTIME', '').strip()
     if js_runtime:

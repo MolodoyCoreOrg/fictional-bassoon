@@ -111,10 +111,32 @@ iterable`). Если площадка временно не отдаёт фай�
 
 ### Если YouTube пишет «Sign in to confirm you’re not a bot»
 
-Экспортируйте cookies из браузера в файл `cookies.txt`, положите его рядом с `bot.py`
-или передайте путь через `COOKIES_FILE`. После изменения cookies обязательно
-перезапустите бота. Без cookies YouTube может отдавать только часть форматов или
-полностью блокировать анализ ссылки.
+Бот сначала ищет каталожные треки в SoundCloud и только затем в YouTube. Порядок
+можно изменить через `AUDIO_SEARCH_SOURCES=scsearch,ytsearch`; чтобы полностью
+отключить YouTube fallback, укажите `AUDIO_SEARCH_SOURCES=scsearch`.
+
+Для прямых YouTube-ссылок экспортируйте свежие cookies только из отдельного
+приватного сеанса в Netscape `cookies.txt`, положите файл рядом с `bot.py`
+или передайте путь через `COOKIES_FILE`. Не коммитьте этот файл.
+
+На серверных IP одного cookies-файла часто недостаточно. Рекомендуемая схема
+yt-dlp — динамический PO-token provider. Запустите sidecar:
+
+```bash
+docker run --name bgutil-provider -d --init -p 4416:4416 \
+  brainicism/bgutil-ytdlp-pot-provider:1.3.1
+```
+
+и добавьте в `.env`:
+
+```env
+YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
+YOUTUBE_PLAYER_CLIENT="mweb"
+YTDLP_JS_RUNTIME="node"
+```
+
+Если бот сам работает в Docker, используйте имя контейнера провайдера вместо
+`127.0.0.1` и объедините контейнеры общей Docker-сетью.
 
 ### Получение токена
 
@@ -213,12 +235,13 @@ TELEGRAM_MAX_UPLOAD_MB="2000"
 ```
 
 Для YouTube используйте свежий Netscape `cookies.txt` через `COOKIES_FILE`.
-Если серверный IP требует Proof-of-Origin token:
+Статический `YOUTUBE_PO_TOKEN` оставлен для совместимости, но YouTube привязывает
+новые токены к видео, поэтому для продакшена используйте динамический provider:
 
 ```env
 YTDLP_JS_RUNTIME="node"
 YOUTUBE_PLAYER_CLIENT="mweb"
-YOUTUBE_PO_TOKEN="mweb.gvs+ВАШ_PO_TOKEN"
+YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
 ```
 
 Без `TELEGRAM_API_BASE_URL` бот автоматически применяет облачный лимит 50 МБ;

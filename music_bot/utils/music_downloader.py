@@ -12,11 +12,22 @@ from utils.config import COOKIES_FILE, FFMPEG_LOCATION, get_anti_block_opts, has
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Приоритетные источники для поиска (ytsearch на первом месте для 100% нахождения)
-SEARCH_SOURCES = [
-    'ytsearch',
-    'scsearch',
-]
+# Public catalogues often expose metadata but not the original media stream.
+# Prefer SoundCloud so a YouTube anti-bot challenge does not break every link.
+SUPPORTED_SEARCH_SOURCES = ('scsearch', 'ytsearch')
+
+
+def _configured_search_sources() -> tuple[str, ...]:
+    configured = os.getenv('AUDIO_SEARCH_SOURCES', 'scsearch,ytsearch')
+    sources = tuple(
+        source.strip().lower()
+        for source in configured.split(',')
+        if source.strip().lower() in SUPPORTED_SEARCH_SOURCES
+    )
+    return sources or SUPPORTED_SEARCH_SOURCES
+
+
+SEARCH_SOURCES = _configured_search_sources()
 
 
 def _is_http_url(value) -> bool:
@@ -259,11 +270,27 @@ async def _resolve_catalog_metadata(url: str) -> dict:
     return metadata
 
 
-def _catalog_search_target(metadata: dict) -> str:
+def _catalog_search_targets(metadata: dict) -> list[str]:
     query = ' - '.join(
         value for value in (metadata.get('artist'), metadata.get('title')) if value
     )
-    return f'ytsearch1:{query} audio'
+    return [f'{source}1:{query} audio' for source in SEARCH_SOURCES]
+
+
+async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
+    errors = []
+    for target in _catalog_search_targets(metadata):
+        try:
+            # Only YouTube benefits from the shared authentication settings.
+            use_cookies = target.startswith('ytsearch')
+            return await _download_info(target, temp_dir, use_cookies=use_cookies)
+        except Exception as error:
+            source = target.partition('search')[0]
+            logger.warning('Catalog match failed in %s: %s', source, error)
+            errors.append(f'{source}: {error}')
+
+    details = '; '.join(errors) if errors else 'источники поиска не настроены'
+    raise RuntimeError(f'Не удалось найти доступную версию трека. {details}')
 
 
 def _unwrap_download_info(info: dict | None) -> dict:
@@ -347,7 +374,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
     try:
         if _is_catalog_reference(url) and not _url_host(url).startswith('music.yandex.'):
             metadata = await _resolve_catalog_metadata(url)
-            info = await _download_info(_catalog_search_target(metadata), temp_dir, use_cookies=True)
+            info = await _download_catalog_match(metadata, temp_dir)
         else:
             try:
                 info = await _download_info(url, temp_dir, use_cookies=_uses_site_cookies(url))
@@ -356,7 +383,7 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
                     raise
                 logger.warning(f'Direct catalogue download failed, using search fallback: {direct_error}')
                 metadata = await _resolve_catalog_metadata(url)
-                info = await _download_info(_catalog_search_target(metadata), temp_dir, use_cookies=True)
+                info = await _download_catalog_match(metadata, temp_dir)
 
         if not info:
             raise ValueError('Источник не вернул данные о треке.')
@@ -435,6 +462,12 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             result['error'] = (
                 'В системе не найден FFmpeg. Установите пакет ffmpeg или укажите '
                 'в .env FFMPEG_LOCATION на файл ffmpeg/папку с ffmpeg.'
+            )
+        elif 'sign in to confirm' in lower_error or "not a bot" in lower_error:
+            result['error'] = (
+                'YouTube отклонил запрос сервера как автоматический. '
+                'Обновите cookies.txt и подключите динамический PO-token provider '
+                'либо временно исключите ytsearch из AUDIO_SEARCH_SOURCES.'
             )
         elif 'unsupported url' in lower_error:
             result['error'] = (
