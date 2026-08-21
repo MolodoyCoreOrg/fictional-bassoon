@@ -1,5 +1,8 @@
 from aiogram import Router, F
-from aiogram.types import (\n    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,\n    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,\n)
+from aiogram.types import (
+    InlineQuery, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile,
+)
 from utils.music_downloader import search_music, download_from_url
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import cache_album
