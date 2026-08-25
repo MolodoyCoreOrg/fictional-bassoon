@@ -65,6 +65,17 @@ if TELEGRAM_MAX_UPLOAD_MB < 1 or TELEGRAM_MAX_UPLOAD_MB > 2000:
 if TELEGRAM_LOCAL_FILE_MODE and not TELEGRAM_LOCAL_API:
     raise ValueError("TELEGRAM_LOCAL_FILE_MODE требует TELEGRAM_API_BASE_URL")
 
+# Загрузка большого файла через multipart может занимать десятки минут. aiogram
+# по умолчанию ждёт ответ только 60 секунд, поэтому для sendVideo нужен отдельный
+# увеличенный тайм-аут. В режиме общей ФС file:// обычно отрабатывает быстрее,
+# однако Bot API всё равно может долго подготавливать большое видео.
+_telegram_upload_timeout = os.getenv("TELEGRAM_UPLOAD_TIMEOUT_SECONDS", "").strip()
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS = int(
+    _telegram_upload_timeout or ("7200" if TELEGRAM_LOCAL_API else "300")
+)
+if TELEGRAM_UPLOAD_TIMEOUT_SECONDS < 60 or TELEGRAM_UPLOAD_TIMEOUT_SECONDS > 86400:
+    raise ValueError("TELEGRAM_UPLOAD_TIMEOUT_SECONDS должен быть в диапазоне 60..86400")
+
 
 def _find_cookies_file() -> str | None:
     """Ищет cookies-файл независимо от текущей рабочей директории."""
