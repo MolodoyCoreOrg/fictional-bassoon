@@ -24,6 +24,26 @@ ADMINS = [int(id.strip()) for id in os.getenv("ADMINS", "").split(",") if id.str
 # Путь к временным файлам
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "..", "temp")
 
+# Inline-аудио отдаётся Telegram через публичный HTTPS gateway этого же
+# приложения. Reverse proxy должен направлять INLINE_MEDIA_BASE_URL на порт ниже.
+INLINE_MEDIA_BASE_URL = os.getenv("INLINE_MEDIA_BASE_URL", "").strip().rstrip("/")
+if INLINE_MEDIA_BASE_URL and not INLINE_MEDIA_BASE_URL.startswith("https://"):
+    raise ValueError("INLINE_MEDIA_BASE_URL должен быть публичным HTTPS URL")
+INLINE_MEDIA_HOST = os.getenv("INLINE_MEDIA_HOST", "0.0.0.0").strip() or "0.0.0.0"
+INLINE_MEDIA_PORT = int(os.getenv("INLINE_MEDIA_PORT", "8080"))
+if INLINE_MEDIA_PORT < 1 or INLINE_MEDIA_PORT > 65535:
+    raise ValueError("INLINE_MEDIA_PORT должен быть в диапазоне 1..65535")
+INLINE_MEDIA_CACHE_DIR = (
+    os.getenv("INLINE_MEDIA_CACHE_DIR", "").strip()
+    or os.path.join(TEMP_DIR, "inline_media_cache")
+)
+TRACK_HISTORY_DB = (
+    os.getenv("TRACK_HISTORY_DB", "").strip()
+    or str(PROJECT_DIR / "data" / "track_history.sqlite3")
+)
+_inline_storage_chat_id = os.getenv("INLINE_STORAGE_CHAT_ID", "").strip()
+INLINE_STORAGE_CHAT_ID = int(_inline_storage_chat_id) if _inline_storage_chat_id else None
+
 # Ссылка на ГУЧИГЕНГОВО
 GUCHI_LINK = "https://band.link/guchigengovo"
 

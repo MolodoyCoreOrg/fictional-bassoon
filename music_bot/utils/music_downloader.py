@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 # Public catalogues often expose metadata but not the original media stream.
 # Prefer SoundCloud so a YouTube anti-bot challenge does not break every link.
-SUPPORTED_SEARCH_SOURCES = ('scsearch', 'ytsearch')
+SUPPORTED_SEARCH_SOURCES = ('scsearch', 'vksearch', 'ytsearch')
 
 
 def _configured_search_sources() -> tuple[str, ...]:
-    configured = os.getenv('AUDIO_SEARCH_SOURCES', 'scsearch,ytsearch')
+    configured = os.getenv('AUDIO_SEARCH_SOURCES', 'scsearch,vksearch,ytsearch')
     sources = tuple(
         source.strip().lower()
         for source in configured.split(',')
@@ -291,7 +291,13 @@ def _catalog_search_targets(metadata: dict) -> list[str]:
     query = ' - '.join(
         value for value in (metadata.get('artist'), metadata.get('title')) if value
     )
-    return [f'{source}1:{query} audio' for source in SEARCH_SOURCES]
+    # VK search uses its HTTP API adapter below and is not a yt-dlp search
+    # prefix. Catalogue matching keeps the two downloadable yt-dlp providers.
+    return [
+        f'{source}1:{query} audio'
+        for source in SEARCH_SOURCES
+        if source != 'vksearch'
+    ]
 
 
 async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
@@ -650,8 +656,78 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
         return []
 
 
+async def _search_vk_source(query: str, limit: int) -> list:
+    """Searches VK Music through the official API when a user token is configured."""
+    access_token = os.getenv('VK_ACCESS_TOKEN', '').strip()
+    if not access_token:
+        logger.info('VK search skipped: VK_ACCESS_TOKEN is not configured')
+        return []
+
+    params = {
+        'q': query,
+        'count': max(1, min(limit, 100)),
+        'sort': 2,
+        'auto_complete': 1,
+        'access_token': access_token,
+        'v': os.getenv('VK_API_VERSION', '5.199').strip() or '5.199',
+    }
+    timeout = aiohttp.ClientTimeout(total=7)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://api.vk.com/method/audio.search',
+            params=params,
+        ) as response:
+            payload = await response.json(content_type=None)
+
+    if payload.get('error'):
+        error = payload['error']
+        logger.warning(
+            'VK audio search failed (%s): %s',
+            error.get('error_code'),
+            error.get('error_msg'),
+        )
+        return []
+
+    entries = []
+    for item in (payload.get('response') or {}).get('items') or []:
+        direct_url = item.get('url')
+        if not _is_http_url(direct_url):
+            continue
+
+        owner_id = item.get('owner_id')
+        audio_id = item.get('id')
+        stable_url = (
+            f'https://vk.com/audio{owner_id}_{audio_id}'
+            if owner_id is not None and audio_id is not None
+            else direct_url
+        )
+        album = item.get('album') or {}
+        thumb = album.get('thumb') or {}
+        thumbnail = next(
+            (
+                thumb.get(name)
+                for name in ('photo_1200', 'photo_600', 'photo_300', 'photo_270')
+                if _is_http_url(thumb.get(name))
+            ),
+            None,
+        )
+        entries.append({
+            'id': f'{owner_id}_{audio_id}',
+            'title': item.get('title') or 'Неизвестно',
+            'artist': item.get('artist') or 'Неизвестно',
+            'duration': item.get('duration'),
+            'webpage_url': stable_url,
+            'download_url': direct_url,
+            'thumbnail': thumbnail,
+            'album': album.get('title'),
+        })
+    return entries
+
+
 async def _search_source(prefix: str, query: str, limit: int) -> list:
     """Returns lightweight search entries without resolving media streams."""
+    if prefix == 'vksearch':
+        return await _search_vk_source(query, limit)
     ydl_opts = {
         **get_anti_block_opts(),
         'extract_flat': 'in_playlist',
@@ -674,33 +750,39 @@ async def _search_source(prefix: str, query: str, limit: int) -> list:
 
 
 async def search_music(query: str, limit: int = 10) -> list:
-    """Searches track metadata quickly enough for Telegram inline queries."""
+    """Searches SoundCloud, VK and YouTube and interleaves their results."""
     if not query.strip() or limit < 1:
         return []
 
+    per_source_limit = max(3, min(limit, 10))
     batches = await asyncio.gather(
-        *(_search_source(prefix, query, limit) for prefix in SEARCH_SOURCES),
+        *(_search_source(prefix, query, per_source_limit) for prefix in SEARCH_SOURCES),
         return_exceptions=True,
     )
 
-    results = []
-    seen_urls = set()
+    normalized_batches = []
     for prefix, entries in zip(SEARCH_SOURCES, batches):
         if isinstance(entries, Exception):
             logger.warning("Search error in %s: %s", prefix, entries)
+            normalized_batches.append([])
             continue
 
+        source_results = []
         for entry in entries:
-            if not entry or len(results) >= limit:
-                break
+            if not entry:
+                continue
 
             video_id = entry.get('id', '')
-            source_url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url') or ''
+            source_url = (
+                entry.get('webpage_url')
+                or entry.get('original_url')
+                or entry.get('url')
+                or ''
+            )
             if prefix.startswith('yt') and video_id and not _is_http_url(source_url):
                 source_url = f"https://www.youtube.com/watch?v={video_id}"
-            if not _is_http_url(source_url) or source_url in seen_urls:
+            if not _is_http_url(source_url):
                 continue
-            seen_urls.add(source_url)
 
             raw_title = entry.get('title') or 'Неизвестно'
             clean_title = re.sub(
@@ -709,12 +791,17 @@ async def search_music(query: str, limit: int = 10) -> list:
                 raw_title,
                 flags=re.IGNORECASE,
             ).strip()
-            artist = entry.get('artist') or entry.get('uploader') or entry.get('channel') or 'Неизвестно'
-
-            results.append({
+            artist = (
+                entry.get('artist')
+                or entry.get('uploader')
+                or entry.get('channel')
+                or 'Неизвестно'
+            )
+            source_results.append({
                 'title': clean_title or raw_title,
                 'artist': artist,
                 'url': source_url,
+                'download_url': entry.get('download_url'),
                 'duration': entry.get('duration'),
                 'thumbnail': _inline_thumbnail_url(entry, prefix),
                 'source': prefix.replace('search', ''),
@@ -722,9 +809,23 @@ async def search_music(query: str, limit: int = 10) -> list:
                 'album_url': entry.get('album_url'),
                 'track_number': entry.get('track_number') or entry.get('playlist_index'),
             })
+        normalized_batches.append(source_results)
 
-        if len(results) >= limit:
-            break
+    results = []
+    seen_urls = set()
+    max_batch_size = max((len(batch) for batch in normalized_batches), default=0)
+    for item_index in range(max_batch_size):
+        for batch in normalized_batches:
+            if item_index >= len(batch):
+                continue
+            track = batch[item_index]
+            if track['url'] in seen_urls:
+                continue
+            seen_urls.add(track['url'])
+            results.append(track)
+            if len(results) >= limit:
+                logger.info("Total found %s results for query: %s", len(results), query)
+                return results
 
     logger.info("Total found %s results for query: %s", len(results), query)
     return results

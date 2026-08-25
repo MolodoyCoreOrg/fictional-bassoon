@@ -26,6 +26,7 @@ from utils.music_downloader import download_from_url, get_album_tracks
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import get_album
 from utils.media_request_cache import get_media_request, save_media_request
+from utils.track_history import remember_audio_message
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -170,13 +171,18 @@ async def send_cached_album(message: Message, album_key: str):
                 f"👤 {html.escape(performer)}\n\n"
                 f"❤️ @GG_Loader_bot"
             )
-            await message.answer_audio(
+            sent_audio = await message.answer_audio(
                 audio=FSInputFile(audio_path),
                 title=title,
                 performer=performer,
                 caption=caption,
                 parse_mode="HTML",
                 thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None,
+            )
+            await remember_audio_message(
+                message.from_user.id,
+                sent_audio,
+                source_url=track.get("url"),
             )
         except Exception as e:
             logger.error(f"Error sending album track {index}/{total}: {e}")
@@ -413,10 +419,15 @@ async def handle_audio_link(message: Message, state: FSMContext):
                 f"❤️ @GG_Loader_bot"
             )
             
-            await message.answer_audio(
+            sent_audio = await message.answer_audio(
                 audio=audio_file, title=title, performer=artist,
                 caption=caption,
                 parse_mode="HTML", thumb=thumb_file
+            )
+            await remember_audio_message(
+                message.from_user.id,
+                sent_audio,
+                source_url=url,
             )
             await msg.delete()
         else:
@@ -689,10 +700,15 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
                     f"📅 {current_date}\n\n"
                     f"❤️ @GG_Loader_bot"
                 )
-                await callback.message.answer_audio(
+                sent_audio = await callback.message.answer_audio(
                     audio=audio_file, title=result['title'], performer=result['artist'],
                     caption=caption,
                     parse_mode="HTML", thumb=thumb_file
+                )
+                await remember_audio_message(
+                    callback.from_user.id,
+                    sent_audio,
+                    source_url=url,
                 )
             
             await status_msg.delete()
@@ -779,14 +795,29 @@ async def handle_custom_track_info(message: Message, state: FSMContext):
 @router.callback_query(StateFilter(MediaStates.waiting_for_channel_link), F.data == "skip_channel_link")
 async def skip_channel_link(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await process_final_audio(callback.message, state, channel_link=None)
+    await process_final_audio(
+        callback.message,
+        state,
+        channel_link=None,
+        user_id=callback.from_user.id,
+    )
 
 @router.message(StateFilter(MediaStates.waiting_for_channel_link), F.text)
 async def handle_custom_channel_link(message: Message, state: FSMContext):
     channel_link = message.text.strip()
-    await process_final_audio(message, state, channel_link)
+    await process_final_audio(
+        message,
+        state,
+        channel_link,
+        user_id=message.from_user.id,
+    )
 
-async def process_final_audio(message: Message, state: FSMContext, channel_link: str = None):
+async def process_final_audio(
+    message: Message,
+    state: FSMContext,
+    channel_link: str = None,
+    user_id: int | None = None,
+):
     data = await state.get_data()
     audio_path = data.get('audio_path')
     cover_path = data.get('cover_path')
@@ -814,11 +845,13 @@ async def process_final_audio(message: Message, state: FSMContext, channel_link:
             f"❤️ @GG_Loader_bot"
         )
         
-        await message.answer_audio(
+        sent_audio = await message.answer_audio(
             audio=audio_file, title=title, performer=artist,
             caption=caption,
             parse_mode="HTML", thumb=thumb_file
         )
+        history_user_id = user_id or message.from_user.id
+        await remember_audio_message(history_user_id, sent_audio)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Ошибка обработки: {str(e)}")
