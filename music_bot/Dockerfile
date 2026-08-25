@@ -18,8 +18,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код бота
 COPY . .
 
-# Создаем директорию для временных файлов
-RUN mkdir -p temp
+# Создаем директории для временных файлов, inline-кэша и истории
+RUN mkdir -p temp/inline_media_cache data
+
+EXPOSE 8080
 
 # Запускаем бота
 CMD ["python", "bot.py"]

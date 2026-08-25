@@ -5,6 +5,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from handlers.main_handlers import router as main_router
 from handlers.inline_handlers import router as inline_router
+from utils.inline_media import start_inline_media_server, stop_inline_media_server
 from utils.config import (
     BOT_TOKEN,
     FFMPEG_LOCATION,
@@ -26,6 +27,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 async def on_startup(bot: Bot):
     """Вызывается при запуске бота"""
     logging.info("Бот запущен!")
+    await start_inline_media_server()
     logging.info(
         "Telegram Bot API: %s, лимит загрузки: %s МБ",
         TELEGRAM_API_BASE_URL or "https://api.telegram.org",
@@ -54,6 +56,7 @@ async def on_startup(bot: Bot):
 async def on_shutdown(bot: Bot):
     """Вызывается при остановке бота"""
     logging.info("Бот останавливается...")
+    await stop_inline_media_server()
     await bot.session.close()
 
 

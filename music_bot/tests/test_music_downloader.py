@@ -107,13 +107,79 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[2][0].startswith("ytsearch1:Artist Name - Track Name"))
         self.assertTrue(calls[2][1])
 
-    def test_soundcloud_is_the_default_catalogue_source(self):
+    def test_all_three_inline_sources_are_enabled_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AUDIO_SEARCH_SOURCES", None)
             self.assertEqual(
                 music_downloader._configured_search_sources(),
-                ("scsearch", "ytsearch"),
+                ("scsearch", "vksearch", "ytsearch"),
             )
+
+    def test_vk_api_adapter_is_not_passed_to_yt_dlp_catalogue_matching(self):
+        with patch.object(
+            music_downloader,
+            "SEARCH_SOURCES",
+            ("scsearch", "vksearch", "ytsearch"),
+        ):
+            targets = music_downloader._catalog_search_targets({
+                "title": "Track",
+                "artist": "Artist",
+            })
+
+        self.assertEqual(
+            targets,
+            [
+                "scsearch1:Artist - Track audio",
+                "ytsearch1:Artist - Track audio",
+            ],
+        )
+
+
+class MultiSourceSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_results_are_interleaved_across_soundcloud_vk_and_youtube(self):
+        async def fake_search(prefix, query, limit):
+            entries = {
+                "scsearch": [{
+                    "id": "sc-1",
+                    "title": "SC Track",
+                    "artist": "SC Artist",
+                    "webpage_url": "https://soundcloud.com/a/sc",
+                }],
+                "vksearch": [{
+                    "id": "1_2",
+                    "title": "VK Track",
+                    "artist": "VK Artist",
+                    "webpage_url": "https://vk.com/audio1_2",
+                    "download_url": "https://cs.example/vk.mp3",
+                }],
+                "ytsearch": [{
+                    "id": "yt-1",
+                    "title": "YT Track",
+                    "channel": "YT Artist",
+                    "webpage_url": "https://www.youtube.com/watch?v=yt-1",
+                }],
+            }
+            return entries[prefix]
+
+        with (
+            patch.object(
+                music_downloader,
+                "SEARCH_SOURCES",
+                ("scsearch", "vksearch", "ytsearch"),
+            ),
+            patch.object(
+                music_downloader,
+                "_search_source",
+                side_effect=fake_search,
+            ),
+        ):
+            results = await music_downloader.search_music("Track", limit=3)
+
+        self.assertEqual(
+            [track["source"] for track in results],
+            ["sc", "vk", "yt"],
+        )
+        self.assertEqual(results[1]["download_url"], "https://cs.example/vk.mp3")
 
 
 if __name__ == "__main__":
