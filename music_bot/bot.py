@@ -12,6 +12,7 @@ from utils.config import (
     TELEGRAM_API_BASE_URL,
     TELEGRAM_LOCAL_FILE_MODE,
     TELEGRAM_MAX_UPLOAD_MB,
+    TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
     TEMP_DIR,
 )
 import logging
@@ -29,9 +30,10 @@ async def on_startup(bot: Bot):
     logging.info("Бот запущен!")
     await start_inline_media_server()
     logging.info(
-        "Telegram Bot API: %s, лимит загрузки: %s МБ",
+        "Telegram Bot API: %s, лимит загрузки: %s МБ, тайм-аут видео: %s с",
         TELEGRAM_API_BASE_URL or "https://api.telegram.org",
         TELEGRAM_MAX_UPLOAD_MB,
+        TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
     )
     
     if FFMPEG_LOCATION:
