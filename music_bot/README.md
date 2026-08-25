@@ -113,9 +113,12 @@ iterable`). Если площадка временно не отдаёт фай�
 
 ### Если YouTube пишет «Sign in to confirm you’re not a bot»
 
-Бот сначала ищет каталожные треки в SoundCloud и только затем в YouTube. Порядок
-можно изменить через `AUDIO_SEARCH_SOURCES=scsearch,vksearch,ytsearch`; чтобы полностью
-отключить YouTube fallback, укажите `AUDIO_SEARCH_SOURCES=scsearch,vksearch`.
+Бот сначала пробует прямую загрузку. Если площадка возвращает 403 либо только
+каталожную страницу, бот извлекает название/исполнителя и перебирает несколько
+совпадений в SoundCloud, VK и YouTube. Порядок задаётся через
+`AUDIO_SEARCH_SOURCES=scsearch,vksearch,ytsearch`, число проверяемых результатов
+каждого источника — через `AUDIO_FALLBACK_CANDIDATES=3`. Для `vksearch` нужен
+`VK_ACCESS_TOKEN`; без него источник автоматически пропускается.
 
 Для прямых YouTube-ссылок экспортируйте свежие cookies только из отдельного
 приватного сеанса в Netscape `cookies.txt`, положите файл рядом с `bot.py`
@@ -139,6 +142,12 @@ YTDLP_JS_RUNTIME="node"
 
 Если бот сам работает в Docker, используйте имя контейнера провайдера вместо
 `127.0.0.1` и объедините контейнеры общей Docker-сетью.
+
+При заданном `YOUTUBE_POT_PROVIDER_URL` бот автоматически выбирает клиент
+`mweb`. Без провайдера он дополнительно повторяет публичные YouTube-загрузки
+через HLS-профиль `web_safari` и cookie-free профиль `android_vr`. Для сайтов
+с Cloudflare устанавливается `curl_cffi` и по умолчанию применяется
+`YTDLP_IMPERSONATE=chrome`.
 
 ### Настройка прямой отправки в inline-режиме
 

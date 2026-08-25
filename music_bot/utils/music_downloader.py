@@ -4,6 +4,7 @@ import os
 import re
 import logging
 import asyncio
+from difflib import SequenceMatcher
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -287,35 +288,112 @@ async def _resolve_catalog_metadata(url: str) -> dict:
     return metadata
 
 
-def _catalog_search_targets(metadata: dict) -> list[str]:
-    query = ' - '.join(
+def _catalog_search_query(metadata: dict) -> str:
+    """Builds a provider-neutral query without source-specific filler words."""
+    return ' - '.join(
         value for value in (metadata.get('artist'), metadata.get('title')) if value
     )
-    # VK search uses its HTTP API adapter below and is not a yt-dlp search
-    # prefix. Catalogue matching keeps the two downloadable yt-dlp providers.
-    return [
-        f'{source}1:{query} audio'
-        for source in SEARCH_SOURCES
-        if source != 'vksearch'
-    ]
+
+
+def _normalize_match_text(value: str | None) -> str:
+    value = _clean_metadata_value(value) or ''
+    return re.sub(r'[^\w]+', ' ', value.casefold(), flags=re.UNICODE).strip()
+
+
+def _candidate_match_score(metadata: dict, entry: dict) -> float:
+    """Keeps provider order but tries the closest title/artist match first."""
+    wanted = _normalize_match_text(
+        ' '.join(
+            value for value in (metadata.get('artist'), metadata.get('title')) if value
+        )
+    )
+    candidate = _normalize_match_text(
+        ' '.join(
+            value for value in (
+                entry.get('artist') or entry.get('uploader') or entry.get('channel'),
+                entry.get('title'),
+            )
+            if value
+        )
+    )
+    if not wanted or not candidate:
+        return 0.0
+    return SequenceMatcher(None, wanted, candidate).ratio()
+
+
+def _candidate_download_target(entry: dict, source: str) -> str | None:
+    direct_url = entry.get('download_url')
+    if _is_http_url(direct_url):
+        return direct_url
+
+    target = entry.get('webpage_url') or entry.get('original_url') or entry.get('url')
+    video_id = entry.get('id')
+    if source.startswith('yt') and video_id and not _is_http_url(target):
+        target = f'https://www.youtube.com/watch?v={video_id}'
+    return target if _is_http_url(target) else None
 
 
 async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
-    errors = []
-    for target in _catalog_search_targets(metadata):
-        try:
-            # Only YouTube benefits from the shared authentication settings.
-            use_cookies = target.startswith('ytsearch')
-            info = await _download_info(target, temp_dir, use_cookies=use_cookies)
-            if not info:
-                raise ValueError('источник не вернул данные о треке')
-            return info
-        except Exception as error:
-            source = target.partition('search')[0]
-            logger.warning('Catalog match failed in %s: %s', source, error)
-            errors.append(f'{source}: {error}')
+    """
+    Searches several candidates per provider. This avoids making catalogue links
+    depend on a single unavailable SoundCloud result or one blocked YouTube CDN URL.
+    """
+    query = _catalog_search_query(metadata)
+    if not query:
+        raise ValueError('Не удалось определить название трека для резервного поиска.')
 
-    details = '; '.join(errors) if errors else 'источники поиска не настроены'
+    errors = {}
+    seen_targets = set()
+    try:
+        candidate_limit = int(os.getenv('AUDIO_FALLBACK_CANDIDATES', '3'))
+    except ValueError:
+        candidate_limit = 3
+    candidate_limit = max(1, min(candidate_limit, 10))
+
+    for source in SEARCH_SOURCES:
+        source_name = source.replace('search', '')
+        try:
+            entries = await _search_source(source, query, candidate_limit)
+        except Exception as error:
+            logger.warning('Catalog search failed in %s: %s', source_name, error)
+            errors[source_name] = str(error)
+            continue
+
+        if not entries:
+            errors[source_name] = 'ничего не найдено'
+            continue
+
+        ordered_entries = sorted(
+            (entry for entry in entries if entry),
+            key=lambda entry: _candidate_match_score(metadata, entry),
+            reverse=True,
+        )
+        for entry in ordered_entries:
+            target = _candidate_download_target(entry, source)
+            if not target or target in seen_targets:
+                continue
+            seen_targets.add(target)
+            try:
+                info = await _download_info(
+                    target,
+                    temp_dir,
+                    use_cookies=source.startswith('yt'),
+                )
+                if info:
+                    return info
+                errors[source_name] = 'источник не вернул данные о треке'
+            except Exception as error:
+                logger.warning(
+                    'Catalog candidate failed in %s (%s): %s',
+                    source_name,
+                    target,
+                    error,
+                )
+                errors[source_name] = str(error)
+
+    details = '; '.join(
+        f'{source}: {message}' for source, message in errors.items()
+    ) or 'источники поиска не настроены'
     raise RuntimeError(f'Не удалось найти доступную версию трека. {details}')
 
 
@@ -325,12 +403,126 @@ def _unwrap_download_info(info: dict | None) -> dict:
     return info or {}
 
 
-def _build_download_opts(temp_dir: str, use_cookies: bool) -> dict:
+
+def _metadata_from_info(info: dict | None) -> dict:
+    info = _unwrap_download_info(info)
+    raw_title = _clean_metadata_value(info.get('track') or info.get('title'))
+    artist = _clean_metadata_value(
+        info.get('artist')
+        or info.get('creator')
+        or info.get('uploader')
+        or info.get('channel')
+    )
+    title = raw_title
+
+    if title and not info.get('track'):
+        for separator in (' - ', ' — ', ' – ', ' ~ '):
+            if separator in title:
+                possible_artist, possible_title = title.split(separator, 1)
+                if not artist or artist.casefold() in possible_artist.casefold():
+                    artist = _clean_metadata_value(possible_artist) or artist
+                    title = _clean_metadata_value(possible_title)
+                break
+
+    thumbnail = info.get('thumbnail')
+    if not thumbnail and info.get('thumbnails'):
+        thumbnails = info.get('thumbnails') or []
+        if thumbnails:
+            thumbnail = thumbnails[-1].get('url')
+
+    return {
+        'title': title,
+        'artist': artist,
+        'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
+    }
+
+
+async def _extract_reference_metadata(url: str) -> dict:
+    """Extracts metadata even when the media CDN itself rejects the download."""
+    extraction_error = None
+    opts = {
+        **get_anti_block_opts(use_cookies=_uses_site_cookies(url)),
+        'skip_download': True,
+        'noplaylist': True,
+        'socket_timeout': 15,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_extract_info_sync, ydl, url, False),
+                timeout=25,
+            )
+        metadata = _metadata_from_info(info)
+        if metadata.get('title'):
+            return metadata
+    except Exception as error:
+        extraction_error = error
+        logger.info('yt-dlp metadata extraction failed for %s: %s', url, error)
+
+    try:
+        return await _resolve_catalog_metadata(url)
+    except Exception as page_error:
+        details = extraction_error or page_error
+        raise RuntimeError(f'Не удалось извлечь название и автора трека: {details}') from page_error
+
+
+def _is_youtube_target(target: str) -> bool:
+    host = _url_host(target)
+    return (
+        target.startswith('ytsearch')
+        or host == 'youtu.be'
+        or host.endswith('youtube.com')
+    )
+
+
+def _merge_extractor_args(base: dict | None, extra: dict | None) -> dict:
+    merged = {
+        extractor: dict(arguments)
+        for extractor, arguments in (base or {}).items()
+    }
+    for extractor, arguments in (extra or {}).items():
+        merged.setdefault(extractor, {}).update(arguments)
+    return merged
+
+
+def _youtube_download_profiles(target: str) -> list[dict]:
+    profiles = [{}]
+    if not _is_youtube_target(target):
+        return profiles
+
+    # web_safari exposes HLS audio that currently does not require a GVS PO token.
+    # android_vr is a final cookie-free client fallback for public videos.
+    profiles.extend([
+        {
+            'format': 'bestaudio[protocol^=m3u8]/bestaudio/best',
+            'extractor_args': {
+                'youtube': {'player_client': ['web_safari']},
+            },
+        },
+        {
+            '_use_cookies': False,
+            'extractor_args': {
+                'youtube': {'player_client': ['android_vr']},
+            },
+        },
+    ])
+    return profiles
+
+
+def _build_download_opts(
+    temp_dir: str,
+    use_cookies: bool,
+    overrides: dict | None = None,
+) -> dict:
     opts = {
         **get_anti_block_opts(use_cookies=use_cookies),
         'format': 'bestaudio/best',
         'socket_timeout': 20,
         'noplaylist': True,
+        'continuedl': False,
+        'overwrites': True,
+        # Keep ranges below YouTube's documented 10 MB throttling threshold.
+        'http_chunk_size': 8 * 1024 * 1024,
         'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
         'postprocessors': [
             {
@@ -340,15 +532,43 @@ def _build_download_opts(temp_dir: str, use_cookies: bool) -> dict:
             },
         ],
     }
+
+    overrides = dict(overrides or {})
+    extractor_args = overrides.pop('extractor_args', None)
+    if extractor_args:
+        opts['extractor_args'] = _merge_extractor_args(
+            opts.get('extractor_args'),
+            extractor_args,
+        )
+    opts.update(overrides)
+
     if FFMPEG_LOCATION:
         opts['ffmpeg_location'] = FFMPEG_LOCATION
     return opts
 
 
 async def _download_info(target: str, temp_dir: str, use_cookies: bool) -> dict:
-    with yt_dlp.YoutubeDL(_build_download_opts(temp_dir, use_cookies)) as ydl:
-        info = await asyncio.to_thread(_extract_info_sync, ydl, target, True)
-    return _unwrap_download_info(info)
+    last_error = None
+    for attempt, raw_profile in enumerate(_youtube_download_profiles(target), start=1):
+        profile = dict(raw_profile)
+        profile_use_cookies = profile.pop('_use_cookies', use_cookies)
+        if attempt > 1:
+            logger.info('Retrying YouTube download with network profile %s', attempt)
+        try:
+            with yt_dlp.YoutubeDL(
+                _build_download_opts(temp_dir, profile_use_cookies, profile)
+            ) as ydl:
+                info = await asyncio.to_thread(_extract_info_sync, ydl, target, True)
+            return _unwrap_download_info(info)
+        except Exception as error:
+            last_error = error
+            if not _is_youtube_target(target):
+                raise
+            logger.warning('YouTube download profile %s failed: %s', attempt, error)
+
+    if last_error:
+        raise last_error
+    return {}
 
 
 async def _download_thumbnail(url: str | None, temp_dir: str) -> str | None:
@@ -407,13 +627,26 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
             info = await _download_catalog_match(metadata, temp_dir)
         else:
             try:
-                info = await _download_info(url, temp_dir, use_cookies=_uses_site_cookies(url))
+                info = await _download_info(
+                    url,
+                    temp_dir,
+                    use_cookies=_uses_site_cookies(url),
+                )
+                if not info:
+                    raise ValueError('источник не вернул данные о треке')
             except Exception as direct_error:
-                if not _is_catalog_reference(url):
-                    raise
-                logger.warning(f'Direct catalogue download failed, using search fallback: {direct_error}')
-                metadata = await _resolve_catalog_metadata(url)
-                info = await _download_catalog_match(metadata, temp_dir)
+                logger.warning(
+                    'Direct download failed, using cross-provider fallback: %s',
+                    direct_error,
+                )
+                try:
+                    metadata = await _extract_reference_metadata(url)
+                    info = await _download_catalog_match(metadata, temp_dir)
+                except Exception as fallback_error:
+                    raise RuntimeError(
+                        'Прямая загрузка не удалась: '
+                        f'{direct_error}. Резервный поиск: {fallback_error}'
+                    ) from fallback_error
 
         if not info:
             raise ValueError('Источник не вернул данные о треке.')
@@ -729,11 +962,11 @@ async def _search_source(prefix: str, query: str, limit: int) -> list:
     if prefix == 'vksearch':
         return await _search_vk_source(query, limit)
     ydl_opts = {
-        **get_anti_block_opts(),
+        **get_anti_block_opts(use_cookies=prefix.startswith('yt')),
         'extract_flat': 'in_playlist',
         'playlistend': limit,
         'noplaylist': True,
-        'socket_timeout': 6,
+        'socket_timeout': 10,
         'quiet': True,
     }
     if FFMPEG_LOCATION:
@@ -744,7 +977,7 @@ async def _search_source(prefix: str, query: str, limit: int) -> list:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = await asyncio.wait_for(
             asyncio.to_thread(_extract_info_sync, ydl, search_query, False),
-            timeout=8,
+            timeout=15,
         )
     return (info or {}).get('entries') or []
 
