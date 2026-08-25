@@ -5,6 +5,7 @@ import html
 import re
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, FSInputFile
@@ -12,7 +13,14 @@ from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
 from models.states import MediaStates
-from utils.config import FFMPEG_EXECUTABLE, TELEGRAM_LOCAL_API, TELEGRAM_MAX_UPLOAD_MB, TEMP_DIR
+from utils.config import (
+    FFMPEG_EXECUTABLE,
+    TELEGRAM_LOCAL_API,
+    TELEGRAM_LOCAL_FILE_MODE,
+    TELEGRAM_MAX_UPLOAD_MB,
+    TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+    TEMP_DIR,
+)
 from utils.keyboard import (
     get_welcome_menu, get_back_keyboard, 
     get_about_guchi_keyboard, get_video_quality_keyboard,
@@ -30,6 +38,35 @@ from utils.track_history import remember_audio_message
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _telegram_media_input(path: str):
+    """Передаёт локальному Bot API путь без повторной multipart-загрузки."""
+    if TELEGRAM_LOCAL_FILE_MODE:
+        return Path(path).resolve().as_uri()
+    return FSInputFile(path)
+
+
+async def _send_video_to_chat(message: Message, result: dict, caption: str) -> None:
+    """Отправляет скачанный файл только как Telegram-видео с длинным тайм-аутом."""
+    thumbnail_path = result.get("thumbnail_path")
+    cover = (
+        _telegram_media_input(thumbnail_path)
+        if thumbnail_path and os.path.exists(thumbnail_path)
+        else None
+    )
+    await message.bot.send_video(
+        chat_id=message.chat.id,
+        video=_telegram_media_input(result["video_path"]),
+        caption=caption,
+        width=result.get("width", 1920),
+        height=result.get("height", 1080),
+        cover=cover,
+        supports_streaming=True,
+        parse_mode="HTML",
+        request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+    )
+
 
 # Регулярное выражение для мгновенного перехвата ссылок из любых соцсетей (работает без кнопок и меню)
 VIDEO_REGEX = r'(https?://)?(www\.|m\.)?(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vk\.com/video|vk\.ru/video|rutube\.ru|pinterest\.com|pin\.it|x\.com|twitter\.com|facebook\.com|fb\.watch)[^\s]*'
@@ -296,8 +333,6 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
     try:
         result = await download_video(video_url, user_temp_dir, format_id)
         if result['success']:
-            video_file = FSInputFile(result['video_path'])
-            
             caption = (
                 f"🍿 {html.escape(result['title'])}\n\n"
                 f"🔗 {html.escape(result.get('url', video_url))}\n\n"
@@ -305,47 +340,36 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                 f"❤️ @GG_Loader_bot"
             )
             
-            thumb_file = FSInputFile(result['thumbnail_path']) if result['thumbnail_path'] and os.path.exists(result['thumbnail_path']) else None
-            
-            # Сначала отправляем как video, чтобы Telegram показывал плеер. Если Bot API
-            # откажется принимать большой/нестандартный файл, пробуем отправить документом
-            # и показываем пользователю реальную причину вместо общего "непредвиденная ошибка".
             try:
-                await callback.message.answer_video(
-                    video=video_file,
-                    caption=caption,
-                    width=result.get('width', 1920),
-                    height=result.get('height', 1080),
-                    cover=thumb_file,
-                    supports_streaming=True,
-                    parse_mode="HTML"
-                )
+                await _send_video_to_chat(callback.message, result, caption)
             except Exception as send_video_error:
-                logger.warning(f"Video send failed, trying document fallback: {send_video_error}")
-                try:
-                    await callback.message.answer_document(
-                        document=FSInputFile(result['video_path']),
-                        caption=caption,
-                        parse_mode="HTML"
-                    )
-                except Exception as send_document_error:
-                    logger.error(f"Document send failed: {send_document_error}")
-                    size_mb = (result.get('filesize') or os.path.getsize(result['video_path'])) / (1024 * 1024)
+                logger.error(f"Video send failed: {send_video_error}")
+                size_mb = (
+                    result.get("filesize") or os.path.getsize(result["video_path"])
+                ) / (1024 * 1024)
+                if TELEGRAM_LOCAL_FILE_MODE:
                     api_hint = (
-                        "Проверьте TELEGRAM_API_BASE_URL и запуск telegram-bot-api с --local."
-                        if TELEGRAM_LOCAL_API
-                        else
+                        "Проверьте, что telegram-bot-api запущен с --local и видит "
+                        "каталог временных файлов по тому же абсолютному пути."
+                    )
+                elif TELEGRAM_LOCAL_API:
+                    api_hint = (
+                        "При общей файловой системе включите TELEGRAM_LOCAL_FILE_MODE=true. "
+                        "Иначе увеличьте TELEGRAM_UPLOAD_TIMEOUT_SECONDS, если соединение медленное."
+                    )
+                else:
+                    api_hint = (
                         "Сейчас используется облачный Bot API с лимитом 50 МБ. "
-                        "Для файлов до 2000 МБ задайте TELEGRAM_API_BASE_URL локального "
-                        "telegram-bot-api, запущенного с --local."
+                        "Для больших файлов нужен локальный telegram-bot-api с --local."
                     )
-                    await status_msg.edit_text(
-                        "❌ Telegram не принял файл для отправки.\n"
-                        f"Размер файла: {size_mb:.1f} МБ.\n"
-                        f"Причина: {html.escape(str(send_document_error))}\n\n"
-                        f"Настроенный лимит: {TELEGRAM_MAX_UPLOAD_MB} МБ. {api_hint}"
-                    )
-                    return
+                await status_msg.edit_text(
+                    "❌ Telegram не принял видео для отправки.\n"
+                    f"Размер файла: {size_mb:.1f} МБ.\n"
+                    f"Причина: {html.escape(str(send_video_error))}\n\n"
+                    f"Настроенный лимит: {TELEGRAM_MAX_UPLOAD_MB} МБ; "
+                    f"тайм-аут: {TELEGRAM_UPLOAD_TIMEOUT_SECONDS} с. {api_hint}"
+                )
+                return
             await status_msg.delete()
         else:
             await status_msg.edit_text(f"❌ Ошибка при скачивании: {result['error']}")

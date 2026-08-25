@@ -95,6 +95,7 @@ ENV="DEV"  # или PROD
 COOKIES_FILE="/app/cookies.txt"  # cookies для YouTube/Instagram/VK при антибот-проверках
 COOKIES_FROM_BROWSER="chrome"  # локально можно использовать cookies из браузера вместо файла
 TELEGRAM_MAX_UPLOAD_MB="2000"  # лимит отправки видео; для обычного Bot API укажите 50
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS="7200"  # ожидание ответа при отправке большого видео
 ```
 
 ### Ссылки на Spotify, Apple Music, VK Audio и Яндекс Музыку
@@ -280,8 +281,9 @@ MIT License
 
 ```env
 TELEGRAM_API_BASE_URL="http://127.0.0.1:8081"
-TELEGRAM_LOCAL_FILE_MODE="false"
+TELEGRAM_LOCAL_FILE_MODE="true"
 TELEGRAM_MAX_UPLOAD_MB="2000"
+TELEGRAM_UPLOAD_TIMEOUT_SECONDS="7200"
 ```
 
 Для YouTube используйте свежий Netscape `cookies.txt` через `COOKIES_FILE`.
@@ -295,5 +297,9 @@ YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
 ```
 
 Без `TELEGRAM_API_BASE_URL` бот автоматически применяет облачный лимит 50 МБ;
-с локальным API — 2000 МБ.
+с локальным API — 2000 МБ. Включайте `TELEGRAM_LOCAL_FILE_MODE=true` только
+когда бот и `telegram-bot-api` видят каталог `temp` по одному абсолютному пути
+(например, через общий Docker volume). Тогда файл передаётся серверу как
+`file://` и не загружается повторно по HTTP. Если общей файловой системы нет,
+оставьте `false`: бот загрузит видео через multipart с увеличенным тайм-аутом.
 
