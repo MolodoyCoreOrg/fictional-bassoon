@@ -145,7 +145,6 @@ async def inline_search(inline_query: InlineQuery):
                     audio_duration=int(duration) if duration else None,
                     caption=_caption(track),
                     parse_mode="HTML",
-                    thumbnail_url=track.get("thumbnail"),
                 )
             )
             seen_source_urls.add(track["url"])
