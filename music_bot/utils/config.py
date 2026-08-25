@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import shutil
 from pathlib import Path
@@ -251,10 +252,17 @@ def _split_env_list(name: str) -> list[str]:
     return [value.strip() for value in os.getenv(name, "").split(",") if value.strip()]
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_anti_block_opts(use_cookies: bool = True):
     """
-    Возвращает актуальные настройки yt-dlp и подключает cookies/PO-token.
-    player_client и User-Agent не фиксируются: yt-dlp выбирает подходящий клиент.
+    Returns shared yt-dlp networking options and optional YouTube auth/POT data.
+    Browser impersonation is enabled automatically when curl_cffi is installed.
     """
     opts = {
         'http_headers': {'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'},
@@ -263,23 +271,38 @@ def get_anti_block_opts(use_cookies: bool = True):
         'no_warnings': True,
         'retries': 5,
         'fragment_retries': 5,
+        'extractor_retries': 5,
+        'file_access_retries': 3,
     }
 
+    if _env_flag('YTDLP_FORCE_IPV4', default=True):
+        opts['source_address'] = '0.0.0.0'
+
+    impersonate = os.getenv('YTDLP_IMPERSONATE')
+    if impersonate is None and importlib.util.find_spec('curl_cffi') is not None:
+        impersonate = 'chrome'
+    if impersonate and impersonate.strip():
+        opts['impersonate'] = impersonate.strip()
+
+    pot_provider_url = os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip().rstrip('/')
     youtube_args = {}
     player_clients = _split_env_list('YOUTUBE_PLAYER_CLIENT')
+    if not player_clients and pot_provider_url:
+        # The current yt-dlp recommendation for provider-issued GVS tokens.
+        player_clients = ['mweb']
     if player_clients:
         youtube_args['player_client'] = player_clients
+
     po_tokens = _split_env_list('YOUTUBE_PO_TOKEN')
     if po_tokens:
         youtube_args['po_token'] = po_tokens
     visitor_data = os.getenv('YOUTUBE_VISITOR_DATA', '').strip()
     if visitor_data:
         youtube_args['visitor_data'] = [visitor_data]
+
     extractor_args = {}
     if youtube_args:
         extractor_args['youtube'] = youtube_args
-
-    pot_provider_url = os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip().rstrip('/')
     if pot_provider_url:
         extractor_args['youtubepot-bgutilhttp'] = {'base_url': [pot_provider_url]}
     if extractor_args:
@@ -288,9 +311,6 @@ def get_anti_block_opts(use_cookies: bool = True):
     js_runtime = os.getenv('YTDLP_JS_RUNTIME', '').strip()
     if js_runtime:
         opts['js_runtimes'] = {js_runtime: {}}
-    impersonate = os.getenv('YTDLP_IMPERSONATE', '').strip()
-    if impersonate:
-        opts['impersonate'] = impersonate
 
     cookies_from_browser = os.getenv('COOKIES_FROM_BROWSER')
     if use_cookies and COOKIES_FILE and os.path.exists(COOKIES_FILE):
