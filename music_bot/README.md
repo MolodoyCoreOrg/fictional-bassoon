@@ -61,8 +61,10 @@ docker build -t gg_loader_bot .
 ```bash
 docker run -d \
   --name gg_loader \
+  -p 127.0.0.1:8080:8080 \
   -e BOT_TOKEN="ваш_токен" \
   -v $(pwd)/temp:/app/temp \
+  -v $(pwd)/data:/app/data \
   gg_loader_bot
 ```
 

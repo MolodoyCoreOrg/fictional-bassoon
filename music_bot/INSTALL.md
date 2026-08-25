@@ -97,7 +97,12 @@ python bot.py
 **Вариант C - Docker:**
 ```bash
 docker build -t gg_loader_bot .
-docker run -d --name gg_loader -e BOT_TOKEN="ваш_токен" gg_loader_bot
+docker run -d --name gg_loader \
+  -p 127.0.0.1:8080:8080 \
+  -e BOT_TOKEN="ваш_токен" \
+  -v "$(pwd)/temp:/app/temp" \
+  -v "$(pwd)/data:/app/data" \
+  gg_loader_bot
 ```
 
 **Вариант D - systemd сервис (для продакшена):**
