@@ -180,6 +180,7 @@ def _resolve_download_format(format_id: str, prefer_hls: bool = False) -> str:
         f"best{limits}[vcodec!=none][acodec!=none]/best{limits}"
     )
 
+
 def _is_youtube_url(url: str) -> bool:
     host = (urlparse(url or "").hostname or "").lower()
     return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
@@ -248,14 +249,15 @@ def _format_dimensions(fmt: Dict) -> tuple[Optional[int], Optional[int]]:
     """Reads real width/height values reported by a platform."""
     width = _as_positive_int(fmt.get('width'))
     height = _as_positive_int(fmt.get('height'))
-    if width or height:
+    if width and height:
         return width, height
 
     resolution = str(fmt.get('resolution') or '')
     match = re.fullmatch(r"\s*(\d+)\s*[x×]\s*(\d+)\s*", resolution)
-    if not match:
-        return None, None
-    return int(match.group(1)), int(match.group(2))
+    if match:
+        width = width or int(match.group(1))
+        height = height or int(match.group(2))
+    return width, height
 
 
 def _fits_dimensions(
@@ -287,9 +289,11 @@ def _build_format_choices(info: Dict, url: str) -> list[Dict]:
 
     for fmt in video_formats:
         width, height = _format_dimensions(fmt)
-        quality = _quality_axis(width, height)
-        if not quality:
+        if not width or not height:
+            # A single edge is ambiguous for portrait media and would recreate
+            # labels such as 1920p for a 1080x1920 Reel.
             continue
+        quality = _quality_axis(width, height)
 
         pixels = (width or 1) * (height or 1)
         current = variants_by_quality.get(quality)
@@ -303,7 +307,7 @@ def _build_format_choices(info: Dict, url: str) -> list[Dict]:
     if not variants_by_quality:
         width, height = _format_dimensions(info)
         quality = _quality_axis(width, height)
-        if quality:
+        if width and height and quality:
             variants_by_quality[quality] = (width, height)
 
     formats_list = []
@@ -370,7 +374,11 @@ def _build_format_choices(info: Dict, url: str) -> list[Dict]:
         'height': height or 0,
         'width': width or 0,
         'ext': 'mp4',
-        'quality_label': quality_label(width, height),
+        'quality_label': (
+            quality_label(width, height)
+            if width and height
+            else 'Лучшее качество'
+        ),
         'size_str': '⌛',
         'filesize': None,
         'too_large': False,
@@ -879,7 +887,7 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
 
         result['height'] = height or 720
         result['width'] = width or int(result['height'] * 16 / 9)
-        result['quality'] = quality_label(width, height) if (width or height) else "MP4"
+        result['quality'] = quality_label(width, height) if (width and height) else "MP4"
         result['url'] = info.get('webpage_url') or url
             
         video_id = info.get('id')
