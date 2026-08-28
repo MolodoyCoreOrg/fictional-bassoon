@@ -242,6 +242,51 @@ class SocialVideoQualityTests(unittest.TestCase):
 
         self.assertEqual(choices, [])
 
+    def test_estimate_matches_separate_stream_selector_fallback_order(self):
+        info = {
+            "duration": 600,
+            "formats": [
+                {
+                    "format_id": "muxed-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 500 * 1024 * 1024,
+                },
+                {
+                    "format_id": "video-only-720",
+                    "width": 1280,
+                    "height": 720,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                    "filesize": 1900 * 1024 * 1024,
+                },
+                {
+                    "format_id": "audio-only",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                    "filesize": 150 * 1024 * 1024,
+                    "abr": 256,
+                },
+            ],
+        }
+
+        with (
+            patch.object(video_downloader, "has_ffmpeg", return_value=True),
+            patch.object(
+                video_downloader,
+                "MAX_FILE_SIZE_BYTES",
+                2000 * 1024 * 1024,
+            ),
+        ):
+            choices = video_downloader._build_format_choices(
+                info,
+                "https://example.com/video",
+            )
+
+        self.assertEqual(choices, [])
+
     def test_bitrate_estimate_filters_large_unknown_filesize(self):
         info = {
             "duration": 7200,
