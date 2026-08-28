@@ -64,7 +64,7 @@ class MediaFeedbackTests(unittest.IsolatedAsyncioTestCase):
         status.delete.assert_awaited_once()
         message.answer_photo.assert_awaited_once()
         photo = message.answer_photo.await_args.kwargs["photo"]
-        self.assertTrue(str(photo.path).endswith("download_error_audio.png"))
+        self.assertTrue(str(photo.path).endswith("Ошибка загрузки аудио.png"))
         message.answer.assert_not_awaited()
 
 
