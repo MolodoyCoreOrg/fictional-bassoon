@@ -76,6 +76,123 @@ class YouTubeVideoProfileTests(unittest.TestCase):
         )
 
 
+
+
+class PinterestFallbackTests(unittest.TestCase):
+    def test_pin_it_and_pinterest_urls_are_detected(self):
+        self.assertTrue(
+            video_downloader._is_pinterest_url("https://pin.it/2bQRQVbz4")
+        )
+        self.assertTrue(
+            video_downloader._is_pinterest_url(
+                "https://www.pinterest.com/pin/285415695111990909/"
+            )
+        )
+        self.assertFalse(
+            video_downloader._is_pinterest_url("https://example.com/pin/123")
+        )
+
+    def test_story_pin_video_list_is_extracted_from_embedded_json(self):
+        page_html = """
+        <script id="__PWS_DATA__" type="application/json">
+        {
+          "props": {
+            "pin": {
+              "story_pin_data": {
+                "pages": [{
+                  "blocks": [{
+                    "video": {
+                      "video_list": {
+                        "V_720P": {
+                          "url": "https://v1.pinimg.com/videos/example-720.mp4",
+                          "width": 720,
+                          "height": 1280
+                        },
+                        "V_HLSV4": {
+                          "url": "https://v1.pinimg.com/videos/example.m3u8",
+                          "width": 720,
+                          "height": 1280
+                        }
+                      }
+                    }
+                  }]
+                }]
+              }
+            }
+          }
+        }
+        </script>
+        """
+
+        documents = video_downloader._extract_pinterest_json_documents(page_html)
+        formats = video_downloader._pinterest_video_formats(documents)
+
+        self.assertEqual(len(formats), 2)
+        self.assertEqual(formats[0]["height"], 1280)
+        self.assertEqual(formats[0]["protocol"], "https")
+        self.assertEqual(formats[1]["protocol"], "m3u8_native")
+        self.assertEqual(
+            formats[0]["http_headers"]["Referer"],
+            "https://www.pinterest.com/",
+        )
+
+    def test_no_formats_error_uses_pinterest_fallback_for_download(self):
+        fallback_info = {
+            "_type": "video",
+            "id": "285415695111990909",
+            "title": "Pinterest video",
+            "formats": [{
+                "format_id": "pinterest-V_720P",
+                "url": "https://v1.pinimg.com/videos/example.mp4",
+            }],
+        }
+
+        class FakeYdl:
+            def __init__(self):
+                self.processed = None
+
+            def extract_info(self, url, download):
+                raise RuntimeError(
+                    "ERROR: [Pinterest] 285415695111990909: "
+                    "No video formats found!"
+                )
+
+            def process_ie_result(self, info, download):
+                self.processed = (info, download)
+                return info
+
+        fake_ydl = FakeYdl()
+        with patch.object(
+            video_downloader,
+            "_extract_pinterest_fallback_info",
+            return_value=fallback_info,
+        ) as fallback:
+            result = video_downloader._extract_info_with_pinterest_fallback(
+                fake_ydl,
+                "https://pin.it/2bQRQVbz4",
+                download=True,
+            )
+
+        self.assertIs(result, fallback_info)
+        self.assertEqual(fake_ydl.processed, (fallback_info, True))
+        fallback.assert_called_once_with(
+            "https://pin.it/2bQRQVbz4",
+            fake_ydl,
+        )
+
+    def test_non_pinterest_no_formats_error_is_not_swallowed(self):
+        class FakeYdl:
+            def extract_info(self, url, download):
+                raise RuntimeError("No video formats found!")
+
+        with self.assertRaisesRegex(RuntimeError, "No video formats"):
+            video_downloader._extract_info_with_pinterest_fallback(
+                FakeYdl(),
+                "https://example.com/video",
+                download=False,
+            )
+
+
 class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_download_reaches_cookie_free_profile_after_403(self):
         calls = []
