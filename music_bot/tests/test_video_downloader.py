@@ -242,6 +242,35 @@ class SocialVideoQualityTests(unittest.TestCase):
 
         self.assertEqual(choices, [])
 
+    def test_quality_is_hidden_when_any_selected_candidate_size_is_unknown(self):
+        info = {
+            "duration": None,
+            "formats": [
+                {
+                    "format_id": "known-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 500 * 1024 * 1024,
+                },
+                {
+                    "format_id": "unknown-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "vp9",
+                    "acodec": "aac",
+                },
+            ],
+        }
+
+        choices = video_downloader._build_format_choices(
+            info,
+            "https://example.com/video",
+        )
+
+        self.assertEqual(choices, [])
+
     def test_estimate_matches_separate_stream_selector_fallback_order(self):
         info = {
             "duration": 600,
