@@ -371,17 +371,11 @@ def _estimate_choice_size(
     if not matching_video:
         return None
 
-    highest_quality = max(
-        _quality_axis(*_format_dimensions(fmt)) or 0
-        for fmt in matching_video
-    )
-    top_video = [
-        fmt
-        for fmt in matching_video
-        if (_quality_axis(*_format_dimensions(fmt)) or 0) == highest_quality
-    ]
-    video_only = [fmt for fmt in top_video if not _has_audio(fmt)]
-    muxed = [fmt for fmt in top_video if _has_audio(fmt)]
+    # Mirror selector order precisely. If any separate video stream exists,
+    # yt-dlp tries bestvideo+bestaudio before the muxed fallback, even when the
+    # best separate video happens to be below the button's upper resolution.
+    video_only = [fmt for fmt in matching_video if not _has_audio(fmt)]
+    muxed = [fmt for fmt in matching_video if _has_audio(fmt)]
     audio_only = [
         fmt
         for fmt in formats
