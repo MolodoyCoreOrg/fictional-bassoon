@@ -79,6 +79,14 @@ class YouTubeVideoProfileTests(unittest.TestCase):
 
 
 class SocialVideoQualityTests(unittest.TestCase):
+    def test_preview_images_are_not_offered_as_video_quality(self):
+        self.assertFalse(video_downloader._has_video({
+            "width": 160,
+            "height": 90,
+            "vcodec": "images",
+            "acodec": "none",
+        }))
+
     def test_instagram_portrait_uses_real_short_edge_qualities(self):
         info = {
             "width": 1080,
