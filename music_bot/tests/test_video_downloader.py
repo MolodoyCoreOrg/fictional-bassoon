@@ -78,6 +78,119 @@ class YouTubeVideoProfileTests(unittest.TestCase):
 
 
 
+class SocialVideoQualityTests(unittest.TestCase):
+    def test_preview_images_are_not_offered_as_video_quality(self):
+        self.assertFalse(video_downloader._has_video({
+            "width": 160,
+            "height": 90,
+            "vcodec": "images",
+            "acodec": "none",
+        }))
+
+    def test_instagram_portrait_uses_real_short_edge_qualities(self):
+        info = {
+            "width": 1080,
+            "height": 1920,
+            "formats": [
+                {
+                    "format_id": "ig-1080",
+                    "width": 1080,
+                    "height": 1920,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 8 * 1024 * 1024,
+                },
+                {
+                    "format_id": "ig-720",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 4 * 1024 * 1024,
+                },
+            ],
+        }
+
+        choices = video_downloader._build_format_choices(
+            info,
+            "https://www.instagram.com/reel/example/",
+        )
+
+        self.assertEqual(
+            [choice["quality_label"] for choice in choices],
+            ["1080p", "720p"],
+        )
+        self.assertEqual(
+            [choice["format_id"] for choice in choices],
+            ["r1080x1920", "r720x1280"],
+        )
+        self.assertNotIn("2K", {choice["quality_label"] for choice in choices})
+        self.assertNotIn("4K", {choice["quality_label"] for choice in choices})
+
+    def test_standard_labels_work_for_landscape_and_portrait(self):
+        self.assertEqual(video_downloader.quality_label(1920, 1080), "1080p")
+        self.assertEqual(video_downloader.quality_label(1080, 1920), "1080p")
+        self.assertEqual(video_downloader.quality_label(2560, 1440), "2K")
+        self.assertEqual(video_downloader.quality_label(1440, 2560), "2K")
+        self.assertEqual(video_downloader.quality_label(3840, 2160), "4K")
+        self.assertEqual(video_downloader.quality_label(2160, 3840), "4K")
+
+    def test_nonstandard_resolution_is_shown_exactly(self):
+        self.assertEqual(
+            video_downloader.quality_label(960, 1706),
+            "960×1706",
+        )
+
+    def test_incomplete_dimensions_do_not_create_1920p_label(self):
+        choices = video_downloader._build_format_choices(
+            {
+                "height": 1920,
+                "formats": [{
+                    "format_id": "ig-unknown-width",
+                    "height": 1920,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                }],
+            },
+            "https://www.instagram.com/reel/example/",
+        )
+
+        self.assertEqual(choices[0]["quality_label"], "Лучшее качество")
+        self.assertNotEqual(choices[0]["quality_label"], "1920p")
+
+    def test_resolution_selector_limits_both_frame_edges(self):
+        with patch.object(video_downloader, "has_ffmpeg", return_value=True):
+            selector = video_downloader._resolve_download_format(
+                "r1080x1920"
+            )
+
+        self.assertIn("[width<=1080][height<=1920]", selector)
+        self.assertFalse(selector.endswith("/best"))
+
+    def test_downloaded_quality_uses_selected_video_stream(self):
+        info = {
+            "width": 2160,
+            "height": 3840,
+            "requested_formats": [
+                {"vcodec": "none", "acodec": "aac"},
+                {
+                    "vcodec": "h264",
+                    "acodec": "none",
+                    "width": 1080,
+                    "height": 1920,
+                },
+            ],
+        }
+
+        width, height = video_downloader._video_dimensions_from_info(info)
+
+        self.assertEqual((width, height), (1080, 1920))
+        self.assertEqual(
+            video_downloader.quality_label(width, height),
+            "1080p",
+        )
+
+
 class PinterestFallbackTests(unittest.TestCase):
     def test_pin_it_and_pinterest_urls_are_detected(self):
         self.assertTrue(
