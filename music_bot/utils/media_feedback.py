@@ -7,11 +7,11 @@ from aiogram.types import FSInputFile, Message
 logger = logging.getLogger(__name__)
 
 MEDIA_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "media"
-PROGRESS_ANIMATION_PATH = MEDIA_ASSETS_DIR / "download_progress.mp4"
+PROGRESS_ANIMATION_PATH = MEDIA_ASSETS_DIR / "Процесс загрузки.mp4"
 ERROR_IMAGE_PATHS = {
-    "video": MEDIA_ASSETS_DIR / "download_error_video.png",
-    "audio": MEDIA_ASSETS_DIR / "download_error_audio.png",
-    "circle": MEDIA_ASSETS_DIR / "download_error_circle.png",
+    "video": MEDIA_ASSETS_DIR / "Ошибка загрузки видео.png",
+    "audio": MEDIA_ASSETS_DIR / "Ошибка загрузки аудио.png",
+    "circle": MEDIA_ASSETS_DIR / "Ошибка загрузки кружочка.png",
 }
 
 
