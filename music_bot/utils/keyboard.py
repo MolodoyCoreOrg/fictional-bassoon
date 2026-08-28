@@ -37,8 +37,8 @@ def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
 
 def get_video_quality_keyboard(url: str, formats: list, title: str, request_id: str = "") -> InlineKeyboardMarkup:
     """
-    Генерирует сетку кнопок для выбора разрешений как на скриншоте
-    (от 144p до 4K, по 3 кнопки в каждом ряду + кнопка Audio внизу)
+    Генерирует кнопки только для разрешений, найденных у исходного видео
+    (по 3 кнопки в каждом ряду + кнопка Audio внизу).
     """
     buttons = []
     current_row = []
