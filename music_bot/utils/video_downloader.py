@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Bot API можно задать TELEGRAM_MAX_UPLOAD_MB=50, чтобы не показывать слишком
 # большие варианты как доступные для отправки.
 MAX_FILE_SIZE_BYTES = TELEGRAM_MAX_UPLOAD_MB * 1024 * 1024
+# yt-dlp often reports an approximate bitrate rather than a byte-accurate size.
+# Keep a margin for MP4 container overhead and provider metadata inaccuracies.
+FORMAT_SIZE_SAFETY_FACTOR = 1.10
 
 # Поддерживаемые платформы
 SUPPORTED_PLATFORMS = [
@@ -275,13 +278,124 @@ def _fits_dimensions(
     return True
 
 
+def _as_positive_float(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _estimated_format_size(fmt: Dict, duration: Optional[float]) -> Optional[int]:
+    """Returns the best available byte estimate for a single yt-dlp format."""
+    for key in ('filesize', 'filesize_approx'):
+        exact_or_approx = _as_positive_int(fmt.get(key))
+        if exact_or_approx:
+            return exact_or_approx
+
+    duration_seconds = _as_positive_float(duration)
+    if not duration_seconds:
+        return None
+
+    total_bitrate = _as_positive_float(fmt.get('tbr'))
+    if not total_bitrate:
+        bitrate_parts = [
+            bitrate
+            for bitrate in (
+                _as_positive_float(fmt.get('vbr')),
+                _as_positive_float(fmt.get('abr')),
+            )
+            if bitrate
+        ]
+        total_bitrate = sum(bitrate_parts) if bitrate_parts else None
+    if not total_bitrate:
+        return None
+
+    return int(
+        duration_seconds
+        * total_bitrate
+        * 1000
+        / 8
+        * FORMAT_SIZE_SAFETY_FACTOR
+    )
+
+
+def _maximum_candidate_size(
+    formats: list[Dict],
+    duration: Optional[float],
+) -> Optional[int]:
+    """Returns a conservative bound, or None if any candidate is unknown."""
+    if not formats:
+        return None
+    estimates = [
+        _estimated_format_size(fmt, duration)
+        for fmt in formats
+    ]
+    if any(estimate is None for estimate in estimates):
+        return None
+    return max(estimates)
+
+
+def _estimate_choice_size(
+    formats: list[Dict],
+    max_width: int,
+    max_height: int,
+    duration: Optional[float],
+) -> Optional[int]:
+    """
+    Estimates the file selected by the same video+audio/muxed fallbacks used by
+    _resolve_download_format. Unknown sizes are deliberately not treated as
+    safe: a quality button is shown only when it can be kept under the limit.
+    """
+    matching_video = [
+        fmt
+        for fmt in formats
+        if _has_video(fmt) and _fits_dimensions(fmt, max_width, max_height)
+    ]
+    if not matching_video:
+        return None
+
+    # Mirror selector order precisely. If any separate video stream exists,
+    # yt-dlp tries bestvideo+bestaudio before the muxed fallback, even when the
+    # best separate video happens to be below the button's upper resolution.
+    video_only = [fmt for fmt in matching_video if not _has_audio(fmt)]
+    muxed = [fmt for fmt in matching_video if _has_audio(fmt)]
+    audio_only = [
+        fmt
+        for fmt in formats
+        if _has_audio(fmt) and not _has_video(fmt)
+    ]
+
+    if has_ffmpeg() and video_only and audio_only:
+        video_size = _maximum_candidate_size(video_only, duration)
+        audio_size = _maximum_candidate_size(audio_only, duration)
+        if video_size is not None and audio_size is not None:
+            return int((video_size + audio_size) * FORMAT_SIZE_SAFETY_FACTOR)
+        return None
+
+    muxed_size = _maximum_candidate_size(muxed, duration)
+    if muxed_size is not None:
+        return int(muxed_size * FORMAT_SIZE_SAFETY_FACTOR)
+    return None
+
+
+def _format_size_label(filesize: int) -> str:
+    size_mb = filesize / (1024 * 1024)
+    if size_mb >= 1024:
+        return f"{size_mb / 1024:.1f} ГБ"
+    return f"{size_mb:.1f} МБ"
+
+
 def _build_format_choices(info: Dict, url: str) -> list[Dict]:
     """
-    Builds buttons from actual variants returned by the current platform.
+    Builds buttons from real variants that have a defensible size estimate and
+    fit the configured Telegram upload limit.
 
-    No platform-wide 1080p/2K/4K menu is fabricated. YouTube, Instagram,
-    RuTube, VK, Pinterest, TikTok, Twitter/X and Facebook therefore expose only
-    resolutions that are present for the concrete video.
+    This prevents a quality from being offered when its selected video/audio
+    streams would exceed TELEGRAM_MAX_UPLOAD_MB. The final downloaded-size check
+    remains as a last line of defence against providers changing the stream.
     """
     formats = info.get('formats') or []
     video_formats = [fmt for fmt in formats if _has_video(fmt)]
@@ -290,17 +404,11 @@ def _build_format_choices(info: Dict, url: str) -> list[Dict]:
     for fmt in video_formats:
         width, height = _format_dimensions(fmt)
         if not width or not height:
-            # A single edge is ambiguous for portrait media and would recreate
-            # labels such as 1920p for a 1080x1920 Reel.
             continue
         quality = _quality_axis(width, height)
-
-        pixels = (width or 1) * (height or 1)
+        pixels = width * height
         current = variants_by_quality.get(quality)
-        current_pixels = (
-            (current[0] or 1) * (current[1] or 1)
-            if current else 0
-        )
+        current_pixels = current[0] * current[1] if current else 0
         if not current or pixels > current_pixels:
             variants_by_quality[quality] = (width, height)
 
@@ -310,82 +418,48 @@ def _build_format_choices(info: Dict, url: str) -> list[Dict]:
         if width and height and quality:
             variants_by_quality[quality] = (width, height)
 
+    duration = info.get('duration')
     formats_list = []
     variants = sorted(
         variants_by_quality.items(),
         key=lambda item: (
             item[0],
-            (item[1][0] or 1) * (item[1][1] or 1),
+            item[1][0] * item[1][1],
         ),
         reverse=True,
     )
 
     for _, (width, height) in variants:
+        estimated_size = _estimate_choice_size(
+            formats,
+            width,
+            height,
+            duration,
+        )
+        if estimated_size is None or estimated_size > MAX_FILE_SIZE_BYTES:
+            continue
+
         matching_formats = [
             fmt
             for fmt in video_formats
             if _fits_dimensions(fmt, width, height)
         ]
-        filesizes = [
-            fmt.get('filesize') or fmt.get('filesize_approx')
-            for fmt in matching_formats
-        ]
-        filesize = max((size for size in filesizes if size), default=None)
-        size_mb = filesize / (1024 * 1024) if filesize else None
-        too_large = bool(filesize and filesize > MAX_FILE_SIZE_BYTES)
-        if size_mb:
-            size_str = (
-                f"{size_mb / 1024:.1f} ГБ"
-                if size_mb >= 1024
-                else f"{size_mb:.1f} МБ"
-            )
-        else:
-            size_str = "⌛"
-
-        dimensions = (
-            f"{width}x{height}"
-            if width and height
-            else f"{height or width}"
-        )
+        dimensions = f"{width}x{height}"
         formats_list.append({
             'format_id': _build_download_format(width, height),
-            'height': height or 0,
-            'width': width or 0,
+            'height': height,
+            'width': width,
             'ext': 'mp4',
             'quality_label': quality_label(width, height),
-            'size_str': size_str,
-            'filesize': filesize,
-            'too_large': too_large,
+            'size_str': _format_size_label(estimated_size),
+            'filesize': estimated_size,
+            'too_large': False,
             'has_audio': any(_has_audio(fmt) for fmt in matching_formats),
             'url': url,
             'format_note': f'Best up to actual source {dimensions}'
         })
 
-    filtered_formats = [fmt for fmt in formats_list if not fmt['too_large']]
-    if not filtered_formats and formats_list:
-        filtered_formats = [formats_list[-1]]
-
-    if filtered_formats:
-        return filtered_formats
-
-    width, height = _format_dimensions(info)
-    return [{
-        'format_id': _build_download_format(width, height),
-        'height': height or 0,
-        'width': width or 0,
-        'ext': 'mp4',
-        'quality_label': (
-            quality_label(width, height)
-            if width and height
-            else 'Лучшее качество'
-        ),
-        'size_str': '⌛',
-        'filesize': None,
-        'too_large': False,
-        'has_audio': True,
-        'url': url,
-        'format_note': 'Best available source format'
-    }]
+    return formats_list
 
 
 def _video_dimensions_from_info(
@@ -842,6 +916,14 @@ def get_video_formats(url: str) -> Dict:
             result['thumbnail'] = thumbnail
 
             result['formats'] = _build_format_choices(info, url)
+            if not result['formats']:
+                result['error'] = (
+                    "Нет доступного качества, которое можно гарантированно отправить "
+                    f"в пределах лимита Telegram {TELEGRAM_MAX_UPLOAD_MB} МБ. "
+                    "Для этого видео сервис не сообщил достаточно данных о размере "
+                    "либо даже минимальное качество превышает лимит."
+                )
+                return result
             result['success'] = True
 
     except Exception as e:

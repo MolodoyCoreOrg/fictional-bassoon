@@ -37,13 +37,24 @@ def get_about_guchi_keyboard() -> InlineKeyboardMarkup:
 
 def get_video_quality_keyboard(url: str, formats: list, title: str, request_id: str = "") -> InlineKeyboardMarkup:
     """
-    Генерирует кнопки только для разрешений, найденных у исходного видео
-    (по 3 кнопки в каждом ряду + кнопка Audio внизу).
+    Генерирует кнопки только для разрешений, найденных у исходного видео,
+    от минимального к максимально допустимому (по 3 кнопки в ряду).
     """
     buttons = []
     current_row = []
+    ordered_formats = sorted(
+        formats,
+        key=lambda fmt: min(
+            [
+                value
+                for value in (fmt.get('width'), fmt.get('height'))
+                if isinstance(value, (int, float)) and value > 0
+            ]
+            or [0]
+        ),
+    )
     
-    for fmt in formats:
+    for fmt in ordered_formats:
         quality_text = f"🎬 {fmt['quality_label']}"
             
         callback_data = (

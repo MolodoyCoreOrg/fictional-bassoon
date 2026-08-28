@@ -35,6 +35,11 @@ from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import get_album
 from utils.media_request_cache import get_media_request, save_media_request
 from utils.track_history import remember_audio_message
+from utils.media_feedback import (
+    close_media_status,
+    send_media_error,
+    send_media_progress,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -267,7 +272,10 @@ async def process_download_video(callback: CallbackQuery, state: FSMContext):
 @router.message(StateFilter(MediaStates.waiting_for_video_link), F.text.regexp(r'https?://[^\s]+'))
 async def handle_video_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
-    msg = await message.answer("⏳ Анализирую ссылку и ищу доступные форматы...")
+    msg = await send_media_progress(
+        message,
+        "⏳ Анализирую ссылку и ищу доступные форматы...",
+    )
     
     # FSM остаётся запасным вариантом для старых сообщений без request_id.
     await state.update_data(
@@ -279,7 +287,16 @@ async def handle_video_link(message: Message, state: FSMContext):
     
     formats_result = await asyncio.to_thread(get_video_formats, url)
     if not formats_result['success'] or not formats_result['formats']:
-        await msg.edit_text(f"❌ Ошибка или форматы не найдены.\n{formats_result.get('error', '')}")
+        error_text = html.escape(
+            formats_result.get('error') or 'Доступные форматы не найдены.'
+        )
+        await send_media_error(
+            message,
+            msg,
+            "video",
+            f"❌ Ошибка при подготовке видео.\n{error_text}",
+            reply_markup=get_back_keyboard(),
+        )
         await state.clear()
         return
 
@@ -308,7 +325,8 @@ async def handle_video_link(message: Message, state: FSMContext):
         except Exception as e:
             logger.warning(f"Не удалось отправить фото: {e}")
             
-    await msg.edit_text(info_text, reply_markup=keyboard, parse_mode="HTML")
+    await close_media_status(msg)
+    await message.answer(info_text, reply_markup=keyboard, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("viddl_"))
 @router.callback_query(F.data.startswith("viddl:"))
@@ -325,7 +343,10 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
         return
 
     await callback.answer()
-    status_msg = await callback.message.answer("⏳ Загружаю видео в выбранном качестве... Пожалуйста, подождите.")
+    status_msg = await send_media_progress(
+        callback.message,
+        "⏳ Загружаю видео в выбранном качестве... Пожалуйста, подождите.",
+    )
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -362,20 +383,33 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
                         "Сейчас используется облачный Bot API с лимитом 50 МБ. "
                         "Для больших файлов нужен локальный telegram-bot-api с --local."
                     )
-                await status_msg.edit_text(
+                await send_media_error(
+                    callback.message,
+                    status_msg,
+                    "video",
                     "❌ Telegram не принял видео для отправки.\n"
                     f"Размер файла: {size_mb:.1f} МБ.\n"
                     f"Причина: {html.escape(str(send_video_error))}\n\n"
                     f"Настроенный лимит: {TELEGRAM_MAX_UPLOAD_MB} МБ; "
-                    f"тайм-аут: {TELEGRAM_UPLOAD_TIMEOUT_SECONDS} с. {api_hint}"
+                    f"тайм-аут: {TELEGRAM_UPLOAD_TIMEOUT_SECONDS} с. {api_hint}",
                 )
                 return
-            await status_msg.delete()
+            await close_media_status(status_msg)
         else:
-            await status_msg.edit_text(f"❌ Ошибка при скачивании: {result['error']}")
+            await send_media_error(
+                callback.message,
+                status_msg,
+                "video",
+                f"❌ Ошибка при скачивании: {html.escape(result['error'])}",
+            )
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ Произошла ошибка при отправке.\n{html.escape(str(e))}")
+        await send_media_error(
+            callback.message,
+            status_msg,
+            "video",
+            f"❌ Произошла ошибка при отправке.\n{html.escape(str(e))}",
+        )
     finally:
         await cleanup_temp_files(user_temp_dir)
 
@@ -414,7 +448,10 @@ async def process_download_audio(callback: CallbackQuery, state: FSMContext):
 @router.message(StateFilter(MediaStates.waiting_for_audio_link), F.text.regexp(r'https?://[^\s]+'))
 async def handle_audio_link(message: Message, state: FSMContext):
     url = extract_url(message.text)
-    msg = await message.answer("🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...")
+    msg = await send_media_progress(
+        message,
+        "🎵 Вижу ссылку на аудио! Начинаю загрузку с обложкой и метаданными...",
+    )
     
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -453,12 +490,22 @@ async def handle_audio_link(message: Message, state: FSMContext):
                 sent_audio,
                 source_url=url,
             )
-            await msg.delete()
+            await close_media_status(msg)
         else:
-            await msg.edit_text(f"❌ Ошибка загрузки: {result['error']}")
+            await send_media_error(
+                message,
+                msg,
+                "audio",
+                f"❌ Ошибка загрузки: {html.escape(result['error'])}",
+            )
     except Exception as e:
         logger.error(f"Error handling audio link: {e}")
-        await msg.edit_text("❌ Произошла ошибка при загрузке трека. Проверьте ссылку или попробуйте позже.")
+        await send_media_error(
+            message,
+            msg,
+            "audio",
+            "❌ Произошла ошибка при загрузке трека. Проверьте ссылку или попробуйте позже.",
+        )
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
@@ -487,26 +534,35 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
     video = message.video
 
     if video.duration > 60:
-        await message.answer(
+        await send_media_error(
+            message,
+            None,
+            "circle",
             "❌ Видео длится больше 1 минуты. Telegram поддерживает кружочки "
             "длительностью не более 60 секунд. Пришлите более короткое видео.",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(),
         )
         return
 
     if video.width != video.height:
-        await message.answer(
+        await send_media_error(
+            message,
+            None,
+            "circle",
             f"❌ Видео должно быть квадратным. Сейчас размер: {video.width}×{video.height}. "
             "Обрежьте ролик до формата 1:1 и отправьте его снова.",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(),
         )
         return
 
     if not FFMPEG_EXECUTABLE:
-        await message.answer(
+        await send_media_error(
+            message,
+            None,
+            "circle",
             "❌ На сервере недоступен FFmpeg, поэтому сейчас подготовить кружочек не получится. "
             "Сообщите администратору бота.",
-            reply_markup=get_back_keyboard()
+            reply_markup=get_back_keyboard(),
         )
         await state.clear()
         return
@@ -515,7 +571,10 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
     os.makedirs(user_temp_dir, exist_ok=True)
     input_path = os.path.join(user_temp_dir, f"input_{video.file_unique_id}.mp4")
     output_path = os.path.join(user_temp_dir, "video_note.mp4")
-    status_msg = await message.answer("⏳ Готовлю видео-кружочек...")
+    status_msg = await send_media_progress(
+        message,
+        "⏳ Готовлю видео-кружочек...",
+    )
 
     try:
         file = await message.bot.get_file(video.file_id)
@@ -556,12 +615,15 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
             duration=video.duration,
             length=480,
         )
-        await status_msg.delete()
+        await close_media_status(status_msg)
     except Exception as e:
         logger.exception("Error creating video note: %s", e)
-        await status_msg.edit_text(
+        await send_media_error(
+            message,
+            status_msg,
+            "circle",
             "❌ Не удалось сделать кружочек из этого видео. "
-            "Проверьте, что ролик квадратный, длится не более минуты и попробуйте снова."
+            "Проверьте, что ролик квадратный, длится не более минуты и попробуйте снова.",
         )
     finally:
         await cleanup_temp_files(user_temp_dir)
@@ -570,9 +632,12 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
 
 @router.message(StateFilter(MediaStates.waiting_for_video_note))
 async def handle_invalid_video_note_upload(message: Message):
-    await message.answer(
+    await send_media_error(
+        message,
+        None,
+        "circle",
         "❌ Отправьте квадратный ролик длительностью не более 1 минуты именно как видео.",
-        reply_markup=get_back_keyboard()
+        reply_markup=get_back_keyboard(),
     )
 
 
@@ -647,7 +712,13 @@ async def handle_video_file_for_audio(message: Message, state: FSMContext):
         await state.set_state(MediaStates.waiting_for_extract_format)
     except Exception as e:
         logger.error(f"Error downloading video file from tg: {e}")
-        await status_msg.edit_text("❌ Произошла ошибка при загрузке видеофайла из Telegram. Попробуйте отправить видео меньшего размера или ссылку.")
+        await send_media_error(
+            message,
+            status_msg,
+            "video",
+            "❌ Произошла ошибка при загрузке видеофайла из Telegram. "
+            "Попробуйте отправить видео меньшего размера или ссылку.",
+        )
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
 
@@ -677,7 +748,10 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
     is_voice = callback.data.startswith("ext_fmt_voice")
     fmt_name = "голосовое сообщение" if is_voice else "MP3 файл"
     
-    status_msg = await callback.message.answer(f"⏳ Извлекаю аудио как {fmt_name}... Пожалуйста, подождите.")
+    status_msg = await send_media_progress(
+        callback.message,
+        f"⏳ Извлекаю аудио как {fmt_name}... Пожалуйста, подождите.",
+    )
     
     user_temp_dir = local_temp_dir if local_temp_dir else os.path.join(TEMP_DIR, str(uuid.uuid4()))
     os.makedirs(user_temp_dir, exist_ok=True)
@@ -735,17 +809,27 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
                     source_url=url,
                 )
             
-            await status_msg.delete()
+            await close_media_status(status_msg)
             if not request_id:
                 try:
                     await callback.message.delete()
                 except Exception:
                     pass
         else:
-            await status_msg.edit_text(f"❌ Ошибка при извлечении: {result['error']}")
+            await send_media_error(
+                callback.message,
+                status_msg,
+                "audio",
+                f"❌ Ошибка при извлечении: {html.escape(result['error'])}",
+            )
     except Exception as e:
         logger.error(f"Error extracting audio format: {e}")
-        await status_msg.edit_text("❌ Произошла непредвиденная ошибка при обработке.")
+        await send_media_error(
+            callback.message,
+            status_msg,
+            "audio",
+            "❌ Произошла непредвиденная ошибка при обработке.",
+        )
     finally:
         await cleanup_temp_files(user_temp_dir)
         if not request_id:
@@ -849,7 +933,10 @@ async def process_final_audio(
     title = data.get('title')
     artist = data.get('artist')
     
-    msg = await message.answer("🛠 Свожу трек и обложку...")
+    msg = await send_media_progress(
+        message,
+        "🛠 Свожу трек и обложку...",
+    )
     
     try:
         processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
@@ -876,9 +963,14 @@ async def process_final_audio(
         )
         history_user_id = user_id or message.from_user.id
         await remember_audio_message(history_user_id, sent_audio)
-        await msg.delete()
+        await close_media_status(msg)
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка обработки: {str(e)}")
+        await send_media_error(
+            message,
+            msg,
+            "audio",
+            f"❌ Ошибка обработки: {html.escape(str(e))}",
+        )
     finally:
         await cleanup_temp_files(user_temp_dir)
         await state.clear()

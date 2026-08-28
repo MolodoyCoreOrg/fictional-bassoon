@@ -141,7 +141,7 @@ class SocialVideoQualityTests(unittest.TestCase):
             "960×1706",
         )
 
-    def test_incomplete_dimensions_do_not_create_1920p_label(self):
+    def test_incomplete_dimensions_are_not_offered_without_safe_size(self):
         choices = video_downloader._build_format_choices(
             {
                 "height": 1920,
@@ -155,8 +155,204 @@ class SocialVideoQualityTests(unittest.TestCase):
             "https://www.instagram.com/reel/example/",
         )
 
-        self.assertEqual(choices[0]["quality_label"], "Лучшее качество")
-        self.assertNotEqual(choices[0]["quality_label"], "1920p")
+        self.assertEqual(choices, [])
+
+    def test_qualities_over_telegram_limit_are_hidden(self):
+        gib = 1024 * 1024 * 1024
+        info = {
+            "duration": 3600,
+            "formats": [
+                {
+                    "format_id": "4k",
+                    "width": 3840,
+                    "height": 2160,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": int(4.7 * gib),
+                },
+                {
+                    "format_id": "1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": int(1.4 * gib),
+                },
+                {
+                    "format_id": "720",
+                    "width": 1280,
+                    "height": 720,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": int(0.7 * gib),
+                },
+            ],
+        }
+
+        with patch.object(
+            video_downloader,
+            "MAX_FILE_SIZE_BYTES",
+            2000 * 1024 * 1024,
+        ):
+            choices = video_downloader._build_format_choices(
+                info,
+                "https://example.com/video",
+            )
+
+        self.assertEqual(
+            [choice["quality_label"] for choice in choices],
+            ["1080p", "720p"],
+        )
+        self.assertNotIn("4K", {choice["quality_label"] for choice in choices})
+
+    def test_separate_video_and_audio_sizes_are_added(self):
+        info = {
+            "duration": 600,
+            "formats": [
+                {
+                    "format_id": "video-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                    "filesize": 1900 * 1024 * 1024,
+                },
+                {
+                    "format_id": "audio",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                    "filesize": 150 * 1024 * 1024,
+                    "abr": 256,
+                },
+            ],
+        }
+
+        with (
+            patch.object(video_downloader, "has_ffmpeg", return_value=True),
+            patch.object(
+                video_downloader,
+                "MAX_FILE_SIZE_BYTES",
+                2000 * 1024 * 1024,
+            ),
+        ):
+            choices = video_downloader._build_format_choices(
+                info,
+                "https://example.com/video",
+            )
+
+        self.assertEqual(choices, [])
+
+    def test_quality_is_hidden_when_any_selected_candidate_size_is_unknown(self):
+        info = {
+            "duration": None,
+            "formats": [
+                {
+                    "format_id": "known-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 500 * 1024 * 1024,
+                },
+                {
+                    "format_id": "unknown-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "vp9",
+                    "acodec": "aac",
+                },
+            ],
+        }
+
+        choices = video_downloader._build_format_choices(
+            info,
+            "https://example.com/video",
+        )
+
+        self.assertEqual(choices, [])
+
+    def test_estimate_matches_separate_stream_selector_fallback_order(self):
+        info = {
+            "duration": 600,
+            "formats": [
+                {
+                    "format_id": "muxed-1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 500 * 1024 * 1024,
+                },
+                {
+                    "format_id": "video-only-720",
+                    "width": 1280,
+                    "height": 720,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                    "filesize": 1900 * 1024 * 1024,
+                },
+                {
+                    "format_id": "audio-only",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                    "filesize": 150 * 1024 * 1024,
+                    "abr": 256,
+                },
+            ],
+        }
+
+        with (
+            patch.object(video_downloader, "has_ffmpeg", return_value=True),
+            patch.object(
+                video_downloader,
+                "MAX_FILE_SIZE_BYTES",
+                2000 * 1024 * 1024,
+            ),
+        ):
+            choices = video_downloader._build_format_choices(
+                info,
+                "https://example.com/video",
+            )
+
+        self.assertEqual(choices, [])
+
+    def test_bitrate_estimate_filters_large_unknown_filesize(self):
+        info = {
+            "duration": 7200,
+            "formats": [
+                {
+                    "format_id": "4k",
+                    "width": 3840,
+                    "height": 2160,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "tbr": 5000,
+                },
+                {
+                    "format_id": "1080",
+                    "width": 1920,
+                    "height": 1080,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "tbr": 1200,
+                },
+            ],
+        }
+
+        with patch.object(
+            video_downloader,
+            "MAX_FILE_SIZE_BYTES",
+            2000 * 1024 * 1024,
+        ):
+            choices = video_downloader._build_format_choices(
+                info,
+                "https://example.com/video",
+            )
+
+        self.assertEqual(
+            [choice["quality_label"] for choice in choices],
+            ["1080p"],
+        )
 
     def test_resolution_selector_limits_both_frame_edges(self):
         with patch.object(video_downloader, "has_ffmpeg", return_value=True):
