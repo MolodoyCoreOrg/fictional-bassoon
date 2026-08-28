@@ -133,6 +133,23 @@ class SocialVideoQualityTests(unittest.TestCase):
             "960×1706",
         )
 
+    def test_incomplete_dimensions_do_not_create_1920p_label(self):
+        choices = video_downloader._build_format_choices(
+            {
+                "height": 1920,
+                "formats": [{
+                    "format_id": "ig-unknown-width",
+                    "height": 1920,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                }],
+            },
+            "https://www.instagram.com/reel/example/",
+        )
+
+        self.assertEqual(choices[0]["quality_label"], "Лучшее качество")
+        self.assertNotEqual(choices[0]["quality_label"], "1920p")
+
     def test_resolution_selector_limits_both_frame_edges(self):
         with patch.object(video_downloader, "has_ffmpeg", return_value=True):
             selector = video_downloader._resolve_download_format(
