@@ -114,9 +114,9 @@ def _has_audio(fmt: Dict) -> bool:
 
 
 def _has_video(fmt: Dict) -> bool:
+    video_codec = str(fmt.get('vcodec') or '').lower()
     return bool(
-        fmt.get('vcodec')
-        and fmt.get('vcodec') != 'none'
+        video_codec not in {'', 'none', 'images'}
         and (fmt.get('height') or fmt.get('width'))
     )
 
