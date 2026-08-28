@@ -8,6 +8,7 @@ import subprocess
 import shutil
 import uuid
 from typing import Dict, Optional
+from urllib.parse import urlparse
 from utils.config import (
     COOKIES_FILE,
     FFMPEG_EXECUTABLE,
@@ -91,7 +92,7 @@ def _normalize_height(height: Optional[int]) -> Optional[int]:
     return 144
 
 
-def _resolve_download_format(format_id: str) -> str:
+def _resolve_download_format(format_id: str, prefer_hls: bool = False) -> str:
     """
     Преобразует короткий маркер кнопки в селектор yt-dlp.
 
@@ -104,6 +105,14 @@ def _resolve_download_format(format_id: str) -> str:
         return format_id
 
     height = int(match.group(1))
+    if prefer_hls:
+        if has_ffmpeg():
+            return (
+                f"bestvideo[height<={height}][protocol^=m3u8]+bestaudio[protocol^=m3u8]/"
+                f"best[height<={height}][protocol^=m3u8][vcodec!=none][acodec!=none]"
+            )
+        return f"best[height<={height}][protocol^=m3u8][vcodec!=none][acodec!=none]"
+
     if has_ffmpeg():
         return (
             f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
@@ -114,24 +123,151 @@ def _resolve_download_format(format_id: str) -> str:
     return f"best[height<={height}][vcodec!=none][acodec!=none]/best[height<={height}]/best"
 
 
-def _human_error(error: Exception) -> str:
+def _is_youtube_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
+
+
+def _merge_extractor_args(base: Dict | None, extra: Dict | None) -> Dict:
+    merged = {
+        extractor: dict(arguments)
+        for extractor, arguments in (base or {}).items()
+    }
+    for extractor, arguments in (extra or {}).items():
+        merged.setdefault(extractor, {}).update(arguments)
+    return merged
+
+
+def _youtube_video_download_profiles(url: str) -> list[Dict]:
+    """Returns progressively more compatible YouTube playback profiles."""
+    profiles = [{'_label': 'default'}]
+    if not _is_youtube_url(url):
+        return profiles
+
+    profiles.extend([
+        {
+            '_label': 'web_safari-hls',
+            '_prefer_hls': True,
+            'extractor_args': {
+                'youtube': {'player_client': ['web_safari']},
+            },
+        },
+        {
+            '_label': 'android_vr-cookie-free',
+            '_use_cookies': False,
+            'extractor_args': {
+                'youtube': {'player_client': ['android_vr']},
+            },
+        },
+    ])
+    return profiles
+
+
+def _build_video_download_opts(
+    temp_dir: str,
+    format_id: str,
+    raw_profile: Dict | None = None,
+) -> Dict:
+    profile = dict(raw_profile or {})
+    profile.pop('_label', None)
+    use_cookies = profile.pop('_use_cookies', True)
+    prefer_hls = profile.pop('_prefer_hls', False)
+
+    opts = {
+        **get_anti_block_opts(use_cookies=use_cookies),
+        'format': _resolve_download_format(format_id, prefer_hls=prefer_hls),
+        'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+        'writethumbnail': True,
+        'thumbnail_format': 'jpg',
+        'noplaylist': True,
+        'socket_timeout': 20,
+        'continuedl': False,
+        'overwrites': True,
+        # Smaller ranges avoid YouTube CDN 403 responses on long media and
+        # make each retry obtain fresh signed playback URLs.
+        'http_chunk_size': 8 * 1024 * 1024,
+    }
+
+    extractor_args = profile.pop('extractor_args', None)
+    if extractor_args:
+        opts['extractor_args'] = _merge_extractor_args(
+            opts.get('extractor_args'),
+            extractor_args,
+        )
+    opts.update(profile)
+
+    if has_ffmpeg():
+        opts.update({
+            'merge_output_format': 'mp4',
+            'postprocessors': [
+                {
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }
+            ]
+        })
+    if FFMPEG_LOCATION:
+        opts['ffmpeg_location'] = FFMPEG_LOCATION
+    return opts
+
+
+def _extract_video_info_sync(url: str, ydl_opts: Dict) -> Dict:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=True)
+
+
+async def _download_video_info(url: str, temp_dir: str, format_id: str) -> Dict:
+    last_error = None
+    profiles = _youtube_video_download_profiles(url)
+    for attempt, profile in enumerate(profiles, start=1):
+        label = profile.get('_label', str(attempt))
+        if attempt > 1:
+            logger.info("Retrying YouTube video download with profile %s", label)
+        try:
+            opts = _build_video_download_opts(temp_dir, format_id, profile)
+            return await asyncio.to_thread(_extract_video_info_sync, url, opts)
+        except Exception as error:
+            last_error = error
+            if not _is_youtube_url(url):
+                raise
+            logger.warning("YouTube video profile %s failed: %s", label, error)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("yt-dlp did not return video information")
+
+
+def _human_error(error: Exception, url: str | None = None) -> str:
     error_str = str(error)
     lower = error_str.lower()
     if "ffprobe and ffmpeg not found" in lower or "ffmpeg not found" in lower or "ffmpeg is not installed" in lower:
         return "В системе не найден FFmpeg. Установите ffmpeg или задайте FFMPEG_LOCATION в .env. Для Docker пересоберите образ; в requirements также добавлен imageio-ffmpeg как запасной вариант."
     if "instagram sent an empty media response" in lower or "without being logged-in" in lower:
         return "Instagram не отдал медиа без авторизации. Проверьте, что пост публичный; для приватных/ограниченных постов добавьте cookies.txt и укажите COOKIES_FILE в .env или настройте COOKIES_FROM_BROWSER."
+    is_forbidden = (
+        "http error 403" in lower
+        or "403: forbidden" in lower
+        or "unable to download video data" in lower
+    )
+    if is_forbidden and _is_youtube_url(url or ""):
+        return (
+            "YouTube отклонил все доступные ссылки на видео (HTTP 403). Бот уже "
+            "попробовал обычный, HLS и cookie-free профили. На сервере запустите "
+            "динамический PO-token provider и задайте "
+            "YOUTUBE_POT_PROVIDER_URL=http://127.0.0.1:4416; при необходимости "
+            "добавьте свежий Netscape cookies.txt через COOKIES_FILE."
+        )
     if "sign in to confirm" in lower or "not a bot" in lower:
         if COOKIES_FILE or os.getenv("COOKIES_FROM_BROWSER"):
             return (
                 "YouTube отклонил текущую авторизацию. Обновите cookies из отдельного "
-                "приватного окна. Для серверного IP может понадобиться PO-token: "
-                "YOUTUBE_PLAYER_CLIENT=mweb и YOUTUBE_PO_TOKEN=mweb.gvs+<token>."
+                "приватного окна. Для серверного IP запустите динамический PO-token "
+                "provider и задайте YOUTUBE_POT_PROVIDER_URL."
             )
         return (
             "YouTube заблокировал неавторизованный IP бота. Добавьте свежий Netscape "
-            "cookies.txt через COOKIES_FILE. Для серверного IP также может понадобиться "
-            "YOUTUBE_PLAYER_CLIENT=mweb и YOUTUBE_PO_TOKEN=mweb.gvs+<token>."
+            "cookies.txt через COOKIES_FILE. Для серверного IP также запустите "
+            "динамический PO-token provider и задайте YOUTUBE_POT_PROVIDER_URL."
         )
     if "unsupported url" in lower:
         return "Площадка или формат ссылки не поддержаны текущей версией yt-dlp. Обновите yt-dlp и проверьте ссылку."
@@ -242,7 +378,7 @@ def get_video_formats(url: str) -> Dict:
 
     except Exception as e:
         logger.error(f"Error getting video formats: {e}")
-        result['error'] = _human_error(e)
+        result['error'] = _human_error(e, url)
 
     return result
 
@@ -268,88 +404,67 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
     }
     
     try:
-        ydl_opts = {
-            **get_anti_block_opts(),
-            'format': _resolve_download_format(format_id),
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'writethumbnail': True,
-            'thumbnail_format': 'jpg',
-        }
-        if has_ffmpeg():
-            ydl_opts.update({
-                'merge_output_format': 'mp4',
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4',
-                    }
-                ]
-            })
-        if FFMPEG_LOCATION:
-            ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = await _download_video_info(url, temp_dir, format_id)
             
-            result['title'] = info.get('title', 'Неизвестно')
-            result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
-            result['author'] = info.get('uploader', 'Неизвестно')
-            raw_date = info.get('upload_date')
-            result['upload_date'] = format_date(raw_date) if raw_date else "Неизвестно"
+        result['title'] = info.get('title', 'Неизвестно')
+        result['thumbnail_path'] = os.path.join(temp_dir, f"{info.get('id')}.jpg")
+        result['author'] = info.get('uploader', 'Неизвестно')
+        raw_date = info.get('upload_date')
+        result['upload_date'] = format_date(raw_date) if raw_date else "Неизвестно"
             
-            duration = info.get('duration', 0)
-            result['duration_str'] = format_duration(duration)
+        duration = info.get('duration', 0)
+        result['duration_str'] = format_duration(duration)
             
-            height = info.get('height', 0)
-            width = info.get('width', 0)
-            if not height or not width:
-                for f in info.get('requested_formats', []):
-                    if f.get('height'):
-                        height = f.get('height')
-                        width = f.get('width', int(height * 16 / 9))
-                        break
-            
-            result['height'] = height or 720
-            result['width'] = width or int(result['height'] * 16 / 9)
-            result['quality'] = f"{height}p" if height else "MP4"
-            result['url'] = info.get('webpage_url') or url
-            
-            video_id = info.get('id')
-            possible_extensions = ['mp4', 'mkv', 'webm', 'avi', 'mov']
-            
-            for ext in possible_extensions:
-                path = os.path.join(temp_dir, f"{video_id}.{ext}")
-                if os.path.exists(path):
-                    result['video_path'] = path
-                    result['filesize'] = os.path.getsize(path)
+        height = info.get('height', 0)
+        width = info.get('width', 0)
+        if not height or not width:
+            for f in info.get('requested_formats', []):
+                if f.get('height'):
+                    height = f.get('height')
+                    width = f.get('width', int(height * 16 / 9))
                     break
             
-            if not result['video_path']:
-                for file in os.listdir(temp_dir):
-                    if file.endswith(('.mp4', '.mkv', '.webm', '.avi', '.mov')) and not file.endswith('.jpg'):
-                        result['video_path'] = os.path.join(temp_dir, file)
-                        result['filesize'] = os.path.getsize(result['video_path'])
-                        break
+        result['height'] = height or 720
+        result['width'] = width or int(result['height'] * 16 / 9)
+        result['quality'] = f"{height}p" if height else "MP4"
+        result['url'] = info.get('webpage_url') or url
+            
+        video_id = info.get('id')
+        possible_extensions = ['mp4', 'mkv', 'webm', 'avi', 'mov']
+            
+        for ext in possible_extensions:
+            path = os.path.join(temp_dir, f"{video_id}.{ext}")
+            if os.path.exists(path):
+                result['video_path'] = path
+                result['filesize'] = os.path.getsize(path)
+                break
+            
+        if not result['video_path']:
+            for file in os.listdir(temp_dir):
+                if file.endswith(('.mp4', '.mkv', '.webm', '.avi', '.mov')) and not file.endswith('.jpg'):
+                    result['video_path'] = os.path.join(temp_dir, file)
+                    result['filesize'] = os.path.getsize(result['video_path'])
+                    break
 
-            if not result['video_path'] or not os.path.exists(result['video_path']):
-                result['error'] = "Видео было скачано, но итоговый файл не найден."
-                return result
+        if not result['video_path'] or not os.path.exists(result['video_path']):
+            result['error'] = "Видео было скачано, но итоговый файл не найден."
+            return result
 
-            if result['filesize'] > MAX_FILE_SIZE_BYTES:
-                max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
-                size_mb = result['filesize'] / (1024 * 1024)
-                result['error'] = (
-                    f"Файл получился слишком большим для отправки через Telegram: "
-                    f"{size_mb:.1f} МБ при лимите {max_mb:.0f} МБ. "
-                    "Выберите качество ниже или увеличьте TELEGRAM_MAX_UPLOAD_MB при использовании локального Bot API."
-                )
-                return result
+        if result['filesize'] > MAX_FILE_SIZE_BYTES:
+            max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+            size_mb = result['filesize'] / (1024 * 1024)
+            result['error'] = (
+                f"Файл получился слишком большим для отправки через Telegram: "
+                f"{size_mb:.1f} МБ при лимите {max_mb:.0f} МБ. "
+                "Выберите качество ниже или увеличьте TELEGRAM_MAX_UPLOAD_MB при использовании локального Bot API."
+            )
+            return result
 
-            result['success'] = True
+        result['success'] = True
             
     except Exception as e:
         logger.error(f"Download error: {e}")
-        result['error'] = _human_error(e)
+        result['error'] = _human_error(e, url)
     
     return result
 
@@ -491,7 +606,7 @@ async def download_audio_from_video(url: str, temp_dir: str, output_format: str 
             
     except Exception as e:
         logger.error(f"Audio extraction error: {e}")
-        result['error'] = _human_error(e)
+        result['error'] = _human_error(e, url)
     
     return result
 

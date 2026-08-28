@@ -35,16 +35,19 @@ pip install -r requirements.txt
 - `aiogram==3.21.0` - фреймворк для Telegram ботов
 - `mutagen>=1.47.0` - работа с метаданными аудио
 - `Pillow>=10.0.0` - обработка изображений (обложки)
-- `yt-dlp>=2024.0.0` - загрузка музыки с площадок
+- `yt-dlp[default,curl-cffi]` - актуальный extractor и JS challenge scripts
+- `bgutil-ytdlp-pot-provider` - подключение динамического YouTube PO-token provider
 - `python-dotenv>=1.0.0` - работа с .env файлами
 
 ---
 
 ## 4. Системные требования
-**FFmpeg** (для обработки аудио):
+**FFmpeg** (для обработки аудио и слияния видео) и **Deno >= 2.3**
+(для актуальных YouTube JavaScript challenges):
 ```bash
 # Ubuntu/Debian
 sudo apt-get install ffmpeg
+# Deno: https://docs.deno.com/runtime/getting_started/installation/
 
 # macOS
 brew install ffmpeg
@@ -94,16 +97,13 @@ python bot.py
 ./run.sh
 ```
 
-**Вариант C - Docker:**
+**Вариант C - Docker (рекомендуется для YouTube):**
 ```bash
-docker build -t gg_loader_bot .
-docker run -d --name gg_loader \
-  -p 127.0.0.1:8080:8080 \
-  -e BOT_TOKEN="ваш_токен" \
-  -v "$(pwd)/temp:/app/temp" \
-  -v "$(pwd)/data:/app/data" \
-  gg_loader_bot
+docker compose up -d --build
 ```
+
+`compose.yaml` одновременно запускает бота, Deno-enabled образ и динамический
+PO-token provider. Перед запуском создайте `.env` и задайте `BOT_TOKEN`.
 
 **Вариант D - systemd сервис (для продакшена):**
 ```bash
