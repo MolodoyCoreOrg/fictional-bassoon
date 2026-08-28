@@ -41,8 +41,16 @@ SUPPORTED_PLATFORMS = [
     'facebook'
 ]
 
-QUALITY_HEIGHTS = [2160, 1440, 1080, 720, 480, 360, 240, 144]
-NORMALIZED_QUALITY_HEIGHTS = QUALITY_HEIGHTS
+STANDARD_QUALITY_LABELS = {
+    2160: "4K",
+    1440: "2K",
+    1080: "1080p",
+    720: "720p",
+    480: "480p",
+    360: "360p",
+    240: "240p",
+    144: "144p",
+}
 
 
 def format_date(date_str: str) -> str:
@@ -63,12 +71,42 @@ def format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def quality_label(height: int) -> str:
-    if height >= 2160:
-        return "4K"
-    if height >= 1440:
-        return "2K"
-    return f"{height}p"
+def _quality_axis(width: Optional[int], height: Optional[int]) -> Optional[int]:
+    """
+    Returns the user-facing quality axis.
+
+    Landscape, portrait and square media all use the shorter frame edge, so a
+    1080x1920 Reel is correctly shown as 1080p instead of the misleading 1920p.
+    """
+    dimensions = [
+        value
+        for value in (_as_positive_int(width), _as_positive_int(height))
+        if value
+    ]
+    return min(dimensions) if dimensions else None
+
+
+def quality_label(
+    width: Optional[int],
+    height: Optional[int] = None,
+) -> str:
+    """Builds a label from real frame dimensions without inventing a tier."""
+    # Keep compatibility with callers that historically passed only height.
+    if height is None:
+        height = width
+        width = None
+
+    quality = _quality_axis(width, height)
+    if not quality:
+        return "Лучшее качество"
+    if quality in STANDARD_QUALITY_LABELS:
+        return STANDARD_QUALITY_LABELS[quality]
+
+    actual_width = _as_positive_int(width)
+    actual_height = _as_positive_int(height)
+    if actual_width and actual_height:
+        return f"{actual_width}×{actual_height}"
+    return f"{quality}p"
 
 
 def _has_audio(fmt: Dict) -> bool:
@@ -76,54 +114,71 @@ def _has_audio(fmt: Dict) -> bool:
 
 
 def _has_video(fmt: Dict) -> bool:
-    return bool(fmt.get('vcodec') and fmt.get('vcodec') != 'none' and fmt.get('height'))
+    return bool(
+        fmt.get('vcodec')
+        and fmt.get('vcodec') != 'none'
+        and (fmt.get('height') or fmt.get('width'))
+    )
 
 
-def _build_download_format(height: int) -> str:
-    """Возвращает короткий callback-safe маркер качества."""
-    return f"h{height}"
-
-
-def _normalize_height(height: Optional[int]) -> Optional[int]:
-    """Приводит нестандартные высоты площадок к понятным кнопкам 144p-1080p."""
-    if not height:
-        return None
-    for target in NORMALIZED_QUALITY_HEIGHTS:
-        if height >= target:
-            return target
-    return 144
+def _build_download_format(
+    width: Optional[int],
+    height: Optional[int] = None,
+) -> str:
+    """Returns a short callback-safe marker for exact source dimensions."""
+    actual_width = _as_positive_int(width)
+    actual_height = _as_positive_int(height)
+    if actual_width and actual_height:
+        return f"r{actual_width}x{actual_height}"
+    if actual_height:
+        return f"h{actual_height}"
+    if actual_width:
+        # Compatibility for the former single-height argument.
+        return f"h{actual_width}"
+    return "best"
 
 
 def _resolve_download_format(format_id: str, prefer_hls: bool = False) -> str:
     """
-    Преобразует короткий маркер кнопки в селектор yt-dlp.
+    Converts a callback marker into a yt-dlp selector.
 
-    Если FFmpeg доступен, скачиваем лучшее видео до выбранной высоты + лучшее аудио.
-    Если FFmpeg недоступен, используем только готовый muxed-файл, чтобы VK/YouTube не падали
-    с ошибкой requested merging but ffmpeg is not installed.
+    Resolution markers retain both source dimensions. This is essential for
+    portrait media: the 1080p option for a 1080x1920 Reel must allow 1920px
+    height while still preventing yt-dlp from silently selecting a larger tier.
     """
-    match = re.fullmatch(r"h(\d+)", format_id or "")
-    if not match:
+    resolution_match = re.fullmatch(r"r(\d+)x(\d+)", format_id or "")
+    legacy_height_match = re.fullmatch(r"h(\d+)", format_id or "")
+    if not resolution_match and not legacy_height_match:
         return format_id
 
-    height = int(match.group(1))
+    if resolution_match:
+        width = int(resolution_match.group(1))
+        height = int(resolution_match.group(2))
+        limits = f"[width<={width}][height<={height}]"
+    else:
+        height = int(legacy_height_match.group(1))
+        limits = f"[height<={height}]"
+
     if prefer_hls:
         if has_ffmpeg():
             return (
-                f"bestvideo[height<={height}][protocol^=m3u8]+bestaudio[protocol^=m3u8]/"
-                f"best[height<={height}][protocol^=m3u8][vcodec!=none][acodec!=none]"
+                f"bestvideo{limits}[protocol^=m3u8]+bestaudio[protocol^=m3u8]/"
+                f"best{limits}[protocol^=m3u8][vcodec!=none][acodec!=none]"
             )
-        return f"best[height<={height}][protocol^=m3u8][vcodec!=none][acodec!=none]"
+        return (
+            f"best{limits}[protocol^=m3u8][vcodec!=none][acodec!=none]"
+        )
 
     if has_ffmpeg():
         return (
-            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-            f"bestvideo[height<={height}]+bestaudio/"
-            f"best[height<={height}][vcodec!=none][acodec!=none]/"
-            f"best[height<={height}]/best"
+            f"bestvideo{limits}[ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo{limits}+bestaudio/"
+            f"best{limits}[vcodec!=none][acodec!=none]/"
+            f"best{limits}"
         )
-    return f"best[height<={height}][vcodec!=none][acodec!=none]/best[height<={height}]/best"
-
+    return (
+        f"best{limits}[vcodec!=none][acodec!=none]/best{limits}"
+    )
 
 def _is_youtube_url(url: str) -> bool:
     host = (urlparse(url or "").hostname or "").lower()
@@ -187,6 +242,156 @@ def _as_positive_int(value) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _format_dimensions(fmt: Dict) -> tuple[Optional[int], Optional[int]]:
+    """Reads real width/height values reported by a platform."""
+    width = _as_positive_int(fmt.get('width'))
+    height = _as_positive_int(fmt.get('height'))
+    if width or height:
+        return width, height
+
+    resolution = str(fmt.get('resolution') or '')
+    match = re.fullmatch(r"\s*(\d+)\s*[x×]\s*(\d+)\s*", resolution)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _fits_dimensions(
+    fmt: Dict,
+    max_width: Optional[int],
+    max_height: Optional[int],
+) -> bool:
+    width, height = _format_dimensions(fmt)
+    if not width and not height:
+        return False
+    if max_width and width and width > max_width:
+        return False
+    if max_height and height and height > max_height:
+        return False
+    return True
+
+
+def _build_format_choices(info: Dict, url: str) -> list[Dict]:
+    """
+    Builds buttons from actual variants returned by the current platform.
+
+    No platform-wide 1080p/2K/4K menu is fabricated. YouTube, Instagram,
+    RuTube, VK, Pinterest, TikTok, Twitter/X and Facebook therefore expose only
+    resolutions that are present for the concrete video.
+    """
+    formats = info.get('formats') or []
+    video_formats = [fmt for fmt in formats if _has_video(fmt)]
+    variants_by_quality = {}
+
+    for fmt in video_formats:
+        width, height = _format_dimensions(fmt)
+        quality = _quality_axis(width, height)
+        if not quality:
+            continue
+
+        pixels = (width or 1) * (height or 1)
+        current = variants_by_quality.get(quality)
+        current_pixels = (
+            (current[0] or 1) * (current[1] or 1)
+            if current else 0
+        )
+        if not current or pixels > current_pixels:
+            variants_by_quality[quality] = (width, height)
+
+    if not variants_by_quality:
+        width, height = _format_dimensions(info)
+        quality = _quality_axis(width, height)
+        if quality:
+            variants_by_quality[quality] = (width, height)
+
+    formats_list = []
+    variants = sorted(
+        variants_by_quality.items(),
+        key=lambda item: (
+            item[0],
+            (item[1][0] or 1) * (item[1][1] or 1),
+        ),
+        reverse=True,
+    )
+
+    for _, (width, height) in variants:
+        matching_formats = [
+            fmt
+            for fmt in video_formats
+            if _fits_dimensions(fmt, width, height)
+        ]
+        filesizes = [
+            fmt.get('filesize') or fmt.get('filesize_approx')
+            for fmt in matching_formats
+        ]
+        filesize = max((size for size in filesizes if size), default=None)
+        size_mb = filesize / (1024 * 1024) if filesize else None
+        too_large = bool(filesize and filesize > MAX_FILE_SIZE_BYTES)
+        if size_mb:
+            size_str = (
+                f"{size_mb / 1024:.1f} ГБ"
+                if size_mb >= 1024
+                else f"{size_mb:.1f} МБ"
+            )
+        else:
+            size_str = "⌛"
+
+        dimensions = (
+            f"{width}x{height}"
+            if width and height
+            else f"{height or width}"
+        )
+        formats_list.append({
+            'format_id': _build_download_format(width, height),
+            'height': height or 0,
+            'width': width or 0,
+            'ext': 'mp4',
+            'quality_label': quality_label(width, height),
+            'size_str': size_str,
+            'filesize': filesize,
+            'too_large': too_large,
+            'has_audio': any(_has_audio(fmt) for fmt in matching_formats),
+            'url': url,
+            'format_note': f'Best up to actual source {dimensions}'
+        })
+
+    filtered_formats = [fmt for fmt in formats_list if not fmt['too_large']]
+    if not filtered_formats and formats_list:
+        filtered_formats = [formats_list[-1]]
+
+    if filtered_formats:
+        return filtered_formats
+
+    width, height = _format_dimensions(info)
+    return [{
+        'format_id': _build_download_format(width, height),
+        'height': height or 0,
+        'width': width or 0,
+        'ext': 'mp4',
+        'quality_label': quality_label(width, height),
+        'size_str': '⌛',
+        'filesize': None,
+        'too_large': False,
+        'has_audio': True,
+        'url': url,
+        'format_note': 'Best available source format'
+    }]
+
+
+def _video_dimensions_from_info(
+    info: Dict,
+) -> tuple[Optional[int], Optional[int]]:
+    """Returns dimensions of the video stream yt-dlp actually selected."""
+    for key in ('requested_formats', 'requested_downloads'):
+        for fmt in info.get(key) or []:
+            if fmt.get('vcodec') == 'none':
+                continue
+            width, height = _format_dimensions(fmt)
+            if width or height:
+                return width, height
+    return _format_dimensions(info)
 
 
 def _pinterest_video_formats(documents: list) -> list[Dict]:
@@ -628,73 +833,7 @@ def get_video_formats(url: str) -> Dict:
                     thumbnail = thumbnails[-1].get('url')
             result['thumbnail'] = thumbnail
 
-            formats = info.get('formats') or []
-            available_heights = sorted({fmt.get('height') for fmt in formats if _has_video(fmt)}, reverse=True)
-
-            if not available_heights and (info.get('height') or info.get('url')):
-                available_heights = [info.get('height') or 720]
-
-            formats_list = []
-            normalized_targets = sorted(
-                {_normalize_height(height) for height in available_heights if _normalize_height(height)},
-                reverse=True,
-            )
-            for target in normalized_targets:
-                if target not in QUALITY_HEIGHTS:
-                    continue
-                candidates = [height for height in available_heights if height and height >= target]
-                if not candidates:
-                    continue
-                source_height = min(candidates)
-                if any(item['height'] == target for item in formats_list):
-                    continue
-
-                height_formats = [fmt for fmt in formats if fmt.get('height') and fmt.get('height') <= target and _has_video(fmt)]
-                filesizes = [fmt.get('filesize') or fmt.get('filesize_approx') for fmt in height_formats]
-                filesize = max((size for size in filesizes if size), default=None)
-                size_mb = filesize / (1024 * 1024) if filesize else None
-                too_large = bool(filesize and filesize > MAX_FILE_SIZE_BYTES)
-                if size_mb:
-                    size_str = f"{size_mb / 1024:.1f} ГБ" if size_mb >= 1024 else f"{size_mb:.1f} МБ"
-                else:
-                    size_str = "⌛"
-
-                width = max((fmt.get('width') or 0 for fmt in height_formats), default=0)
-                formats_list.append({
-                    'format_id': _build_download_format(target),
-                    'height': target,
-                    'width': width,
-                    'ext': 'mp4',
-                    'quality_label': quality_label(target),
-                    'size_str': size_str,
-                    'filesize': filesize,
-                    'too_large': too_large,
-                    'has_audio': any(_has_audio(fmt) for fmt in height_formats),
-                    'url': url,
-                    'format_note': f'Best up to {target}p (source {source_height}p)'
-                })
-
-            filtered_formats = [fmt for fmt in formats_list if not fmt['too_large']]
-            if not filtered_formats and formats_list:
-                filtered_formats = [formats_list[-1]]
-
-            if not filtered_formats:
-                fallback_height = info.get('height') or 720
-                filtered_formats = [{
-                    'format_id': _build_download_format(fallback_height),
-                    'height': fallback_height,
-                    'width': info.get('width') or 0,
-                    'ext': 'mp4',
-                    'quality_label': 'Лучшее качество',
-                    'size_str': '⌛',
-                    'filesize': None,
-                    'too_large': False,
-                    'has_audio': True,
-                    'url': url,
-                    'format_note': 'Best'
-                }]
-
-            result['formats'] = filtered_formats
+            result['formats'] = _build_format_choices(info, url)
             result['success'] = True
 
     except Exception as e:
@@ -736,18 +875,11 @@ async def download_video(url: str, temp_dir: str, format_id: str) -> Dict:
         duration = info.get('duration', 0)
         result['duration_str'] = format_duration(duration)
             
-        height = info.get('height', 0)
-        width = info.get('width', 0)
-        if not height or not width:
-            for f in info.get('requested_formats', []):
-                if f.get('height'):
-                    height = f.get('height')
-                    width = f.get('width', int(height * 16 / 9))
-                    break
-            
+        width, height = _video_dimensions_from_info(info)
+
         result['height'] = height or 720
         result['width'] = width or int(result['height'] * 16 / 9)
-        result['quality'] = f"{height}p" if height else "MP4"
+        result['quality'] = quality_label(width, height) if (width or height) else "MP4"
         result['url'] = info.get('webpage_url') or url
             
         video_id = info.get('id')
