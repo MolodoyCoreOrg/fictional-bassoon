@@ -322,34 +322,20 @@ def _estimated_format_size(fmt: Dict, duration: Optional[float]) -> Optional[int
     )
 
 
-def _format_preference_key(fmt: Dict) -> tuple:
-    """Approximates yt-dlp's preference within one requested resolution."""
-    width, height = _format_dimensions(fmt)
-    return (
-        _quality_axis(width, height) or 0,
-        (width or 1) * (height or 1),
-        _as_positive_float(fmt.get('fps')) or 0,
-        _as_positive_float(fmt.get('tbr')) or 0,
-        _as_positive_float(fmt.get('vbr')) or 0,
-        _as_positive_int(fmt.get('filesize'))
-        or _as_positive_int(fmt.get('filesize_approx'))
-        or 0,
-    )
-
-
-def _audio_preference_key(fmt: Dict) -> tuple:
-    return (
-        _as_positive_float(fmt.get('abr')) or 0,
-        _as_positive_float(fmt.get('tbr')) or 0,
-        _as_positive_float(fmt.get('asr')) or 0,
-        _as_positive_int(fmt.get('filesize'))
-        or _as_positive_int(fmt.get('filesize_approx'))
-        or 0,
-    )
-
-
-def _pick_preferred_format(formats: list[Dict], key) -> Optional[Dict]:
-    return max(formats, key=key) if formats else None
+def _maximum_candidate_size(
+    formats: list[Dict],
+    duration: Optional[float],
+) -> Optional[int]:
+    """Returns a conservative bound, or None if any candidate is unknown."""
+    if not formats:
+        return None
+    estimates = [
+        _estimated_format_size(fmt, duration)
+        for fmt in formats
+    ]
+    if any(estimate is None for estimate in estimates):
+        return None
+    return max(estimates)
 
 
 def _estimate_choice_size(
@@ -383,19 +369,15 @@ def _estimate_choice_size(
     ]
 
     if has_ffmpeg() and video_only and audio_only:
-        video_format = _pick_preferred_format(video_only, _format_preference_key)
-        audio_format = _pick_preferred_format(audio_only, _audio_preference_key)
-        video_size = _estimated_format_size(video_format, duration)
-        audio_size = _estimated_format_size(audio_format, duration)
+        video_size = _maximum_candidate_size(video_only, duration)
+        audio_size = _maximum_candidate_size(audio_only, duration)
         if video_size is not None and audio_size is not None:
             return int((video_size + audio_size) * FORMAT_SIZE_SAFETY_FACTOR)
         return None
 
-    muxed_format = _pick_preferred_format(muxed, _format_preference_key)
-    if muxed_format:
-        muxed_size = _estimated_format_size(muxed_format, duration)
-        if muxed_size is not None:
-            return int(muxed_size * FORMAT_SIZE_SAFETY_FACTOR)
+    muxed_size = _maximum_candidate_size(muxed, duration)
+    if muxed_size is not None:
+        return int(muxed_size * FORMAT_SIZE_SAFETY_FACTOR)
     return None
 
 
