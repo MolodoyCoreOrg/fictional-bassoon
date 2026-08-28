@@ -130,7 +130,7 @@ yt-dlp — динамический PO-token provider. Запустите sideca
 
 ```bash
 docker run --name bgutil-provider -d --init -p 4416:4416 \
-  brainicism/bgutil-ytdlp-pot-provider:1.3.1
+  brainicism/bgutil-ytdlp-pot-provider:1.3.2
 ```
 
 и добавьте в `.env`:
@@ -138,17 +138,19 @@ docker run --name bgutil-provider -d --init -p 4416:4416 \
 ```env
 YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
 YOUTUBE_PLAYER_CLIENT="mweb"
-YTDLP_JS_RUNTIME="node"
+YTDLP_JS_RUNTIME="deno"
 ```
 
-Если бот сам работает в Docker, используйте имя контейнера провайдера вместо
-`127.0.0.1` и объедините контейнеры общей Docker-сетью.
+Для Docker эти настройки уже включены в `compose.yaml`: создайте `.env` с
+`BOT_TOKEN`, затем запустите `docker compose up -d --build`. Compose поднимет
+бота и PO-token provider в общей сети. При запуске через systemd установите
+Deno >= 2.3; альтернативный Node.js должен быть версии 22 или новее.
 
 При заданном `YOUTUBE_POT_PROVIDER_URL` бот автоматически выбирает клиент
-`mweb`. Без провайдера он дополнительно повторяет публичные YouTube-загрузки
-через HLS-профиль `web_safari` и cookie-free профиль `android_vr`. Для сайтов
-с Cloudflare устанавливается `curl_cffi` и по умолчанию применяется
-`YTDLP_IMPERSONATE=chrome`.
+`mweb`. Если обычная загрузка видео возвращает 403, бот заново получает свежие
+ссылки и пробует HLS-профиль `web_safari`, затем cookie-free профиль
+`android_vr`. Для сайтов с Cloudflare устанавливается `curl_cffi` и по
+умолчанию применяется `YTDLP_IMPERSONATE=chrome`.
 
 ### Настройка прямой отправки в inline-режиме
 
@@ -291,7 +293,7 @@ TELEGRAM_UPLOAD_TIMEOUT_SECONDS="7200"
 новые токены к видео, поэтому для продакшена используйте динамический provider:
 
 ```env
-YTDLP_JS_RUNTIME="node"
+YTDLP_JS_RUNTIME="deno"
 YOUTUBE_PLAYER_CLIENT="mweb"
 YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
 ```
