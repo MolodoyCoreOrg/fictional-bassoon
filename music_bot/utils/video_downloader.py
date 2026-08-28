@@ -2,13 +2,15 @@ import yt_dlp
 import os
 import re
 import aiohttp
+import html
+import json
 import logging
 import asyncio
 import subprocess
 import shutil
 import uuid
 from typing import Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from utils.config import (
     COOKIES_FILE,
     FFMPEG_EXECUTABLE,
@@ -128,6 +130,309 @@ def _is_youtube_url(url: str) -> bool:
     return host == 'youtu.be' or host == 'youtube.com' or host.endswith('.youtube.com')
 
 
+def _is_pinterest_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return (
+        host == "pin.it"
+        or host == "pinterest.com"
+        or host.endswith(".pinterest.com")
+    )
+
+
+def _decode_embedded_json(raw_script: str):
+    """Extracts a JSON value from a script tag, including assignment wrappers."""
+    decoder = json.JSONDecoder()
+    raw_values = [raw_script.strip()]
+    unescaped = html.unescape(raw_script).strip()
+    if unescaped and unescaped != raw_values[0]:
+        raw_values.append(unescaped)
+
+    for raw_value in raw_values:
+        if not raw_value:
+            continue
+
+        starts = [0]
+        starts.extend(
+            match.start()
+            for match in re.finditer(r"[\{\[]", raw_value)
+        )
+        for start in dict.fromkeys(starts):
+            try:
+                value, _ = decoder.raw_decode(raw_value[start:])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(value, (dict, list)):
+                return value
+    return None
+
+
+def _extract_pinterest_json_documents(page_html: str) -> list:
+    documents = []
+    for match in re.finditer(
+        r"<script\b[^>]*>(.*?)</script\s*>",
+        page_html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        value = _decode_embedded_json(match.group(1))
+        if value is not None:
+            documents.append(value)
+    return documents
+
+
+def _as_positive_int(value) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _pinterest_video_formats(documents: list) -> list[Dict]:
+    """Finds both ordinary Pin and Idea Pin/Story Pin video variants."""
+    formats_by_url = {}
+
+    def visit(value, path=()):
+        if isinstance(value, dict):
+            raw_url = value.get("url") or value.get("src")
+            if isinstance(raw_url, str):
+                media_url = html.unescape(raw_url).replace(r"\/", "/")
+                parsed = urlparse(media_url)
+                path_lower = parsed.path.lower()
+                context = "/".join(str(part).lower() for part in path)
+                mime_type = str(
+                    value.get("mime_type")
+                    or value.get("content_type")
+                    or value.get("mimeType")
+                    or ""
+                ).lower()
+                extension = os.path.splitext(path_lower)[1]
+                image_extension = extension in {
+                    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"
+                }
+                is_video = (
+                    mime_type.startswith("video/")
+                    or extension in {".mp4", ".m4v", ".mov", ".m3u8"}
+                    or "/videos/" in path_lower
+                    or "video_list" in context
+                )
+
+                if (
+                    parsed.scheme in {"http", "https"}
+                    and is_video
+                    and not image_extension
+                    and media_url not in formats_by_url
+                ):
+                    label = str(path[-1] if path else value.get("format") or "video")
+                    height = _as_positive_int(
+                        value.get("height") or value.get("original_height")
+                    )
+                    width = _as_positive_int(
+                        value.get("width") or value.get("original_width")
+                    )
+                    if not height:
+                        height_match = re.search(r"(\d{3,4})p", label, re.IGNORECASE)
+                        if height_match:
+                            height = int(height_match.group(1))
+
+                    is_hls = extension == ".m3u8" or "hls" in label.lower()
+                    safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label).strip("-")
+                    fmt = {
+                        "format_id": f"pinterest-{safe_label or len(formats_by_url) + 1}",
+                        "url": media_url,
+                        "ext": "mp4",
+                        "protocol": "m3u8_native" if is_hls else "https",
+                        "vcodec": "h264",
+                        "acodec": "aac",
+                        "http_headers": {
+                            "Referer": "https://www.pinterest.com/",
+                        },
+                    }
+                    if height:
+                        fmt["height"] = height
+                    if width:
+                        fmt["width"] = width
+
+                    filesize = _as_positive_int(
+                        value.get("filesize")
+                        or value.get("file_size")
+                        or value.get("size")
+                    )
+                    if filesize:
+                        fmt["filesize"] = filesize
+                    formats_by_url[media_url] = fmt
+
+            for key, child in value.items():
+                visit(child, path + (key,))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, path + (str(index),))
+
+    for document in documents:
+        visit(document)
+
+    return sorted(
+        formats_by_url.values(),
+        key=lambda fmt: (
+            fmt.get("height") or 0,
+            fmt.get("protocol") != "m3u8_native",
+        ),
+        reverse=True,
+    )
+
+
+def _find_json_text(documents: list, keys: tuple[str, ...]) -> Optional[str]:
+    def find(value, wanted_key: str):
+        if isinstance(value, dict):
+            candidate = value.get(wanted_key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+            for child in value.values():
+                found = find(child, wanted_key)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find(child, wanted_key)
+                if found:
+                    return found
+        return None
+
+    for key in keys:
+        for document in documents:
+            found = find(document, key)
+            if found:
+                return found
+    return None
+
+
+def _read_ydl_url(ydl: yt_dlp.YoutubeDL, url: str) -> tuple[str, str]:
+    response = ydl.urlopen(url)
+    try:
+        raw_body = response.read()
+        charset = None
+        headers = getattr(response, "headers", None)
+        if headers and hasattr(headers, "get_content_charset"):
+            charset = headers.get_content_charset()
+        page_text = raw_body.decode(charset or "utf-8", errors="replace")
+        resolved_url = getattr(response, "url", None)
+        if not resolved_url and hasattr(response, "geturl"):
+            resolved_url = response.geturl()
+        return page_text, str(resolved_url or url)
+    finally:
+        response.close()
+
+
+def _pinterest_pin_id(url: str) -> Optional[str]:
+    match = re.search(r"/pin/(?:[^/?#]+--)?(\d+)", url or "")
+    return match.group(1) if match else None
+
+
+def _extract_pinterest_fallback_info(
+    url: str,
+    ydl: yt_dlp.YoutubeDL,
+) -> Dict:
+    """
+    Extracts Pinterest Story/Idea Pin videos that the stock extractor can
+    currently identify as a pin but sometimes exposes without formats.
+    """
+    page_html, resolved_url = _read_ydl_url(ydl, url)
+    documents = _extract_pinterest_json_documents(page_html)
+    pin_id = _pinterest_pin_id(resolved_url) or _pinterest_pin_id(url)
+
+    formats = _pinterest_video_formats(documents)
+    if not formats and pin_id:
+        api_data = quote(
+            json.dumps(
+                {
+                    "options": {
+                        "id": pin_id,
+                        "field_set_key": "auth_web_main_pin",
+                        "noCache": True,
+                    },
+                    "context": {},
+                },
+                separators=(",", ":"),
+            )
+        )
+        api_url = (
+            "https://www.pinterest.com/resource/PinResource/get/"
+            f"?source_url=/pin/{pin_id}/&data={api_data}"
+        )
+        try:
+            api_text, _ = _read_ydl_url(ydl, api_url)
+            api_document = json.loads(api_text)
+        except Exception as error:
+            logger.warning("Pinterest PinResource fallback failed: %s", error)
+        else:
+            documents.append(api_document)
+            formats = _pinterest_video_formats(documents)
+
+    if not formats:
+        raise RuntimeError(
+            "Pinterest pin does not expose downloadable video formats"
+        )
+
+    fallback_id = pin_id or uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        resolved_url,
+    ).hex[:16]
+    title = _find_json_text(
+        documents,
+        ("grid_title", "title", "closeup_description", "description"),
+    ) or f"Pinterest {fallback_id}"
+    thumbnail = _find_json_text(
+        documents,
+        ("image_large_url", "thumbnail_url"),
+    )
+    uploader = _find_json_text(
+        documents,
+        ("full_name", "username"),
+    )
+
+    known_heights = [fmt["height"] for fmt in formats if fmt.get("height")]
+    known_widths = [fmt["width"] for fmt in formats if fmt.get("width")]
+    return {
+        "_type": "video",
+        "id": fallback_id,
+        "title": title,
+        "uploader": uploader or "Pinterest",
+        "webpage_url": resolved_url,
+        "original_url": url,
+        "thumbnail": thumbnail,
+        "height": max(known_heights, default=720),
+        "width": max(known_widths, default=0) or None,
+        "formats": formats,
+        "extractor": "Pinterest fallback",
+        "extractor_key": "PinterestFallback",
+    }
+
+
+def _extract_info_with_pinterest_fallback(
+    ydl: yt_dlp.YoutubeDL,
+    url: str,
+    download: bool,
+) -> Dict:
+    try:
+        return ydl.extract_info(url, download=download)
+    except Exception as error:
+        lower = str(error).lower()
+        if (
+            not _is_pinterest_url(url)
+            or "no video formats found" not in lower
+        ):
+            raise
+
+        logger.warning(
+            "yt-dlp returned no Pinterest formats; trying embedded pin data"
+        )
+        info = _extract_pinterest_fallback_info(url, ydl)
+        if download:
+            return ydl.process_ie_result(info, download=True)
+        return info
+
+
 def _merge_extractor_args(base: Dict | None, extra: Dict | None) -> Dict:
     merged = {
         extractor: dict(arguments)
@@ -213,7 +518,11 @@ def _build_video_download_opts(
 
 def _extract_video_info_sync(url: str, ydl_opts: Dict) -> Dict:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=True)
+        return _extract_info_with_pinterest_fallback(
+            ydl,
+            url,
+            download=True,
+        )
 
 
 async def _download_video_info(url: str, temp_dir: str, format_id: str) -> Dict:
@@ -269,6 +578,14 @@ def _human_error(error: Exception, url: str | None = None) -> str:
             "cookies.txt через COOKIES_FILE. Для серверного IP также запустите "
             "динамический PO-token provider и задайте YOUTUBE_POT_PROVIDER_URL."
         )
+    if _is_pinterest_url(url or "") and (
+        "no video formats found" in lower
+        or "does not expose downloadable video formats" in lower
+    ):
+        return (
+            "Pinterest не отдал видеофайл для этого пина. Убедитесь, что пин "
+            "публичный и содержит видео, а не только изображение."
+        )
     if "unsupported url" in lower:
         return "Площадка или формат ссылки не поддержаны текущей версией yt-dlp. Обновите yt-dlp и проверьте ссылку."
     return error_str
@@ -295,7 +612,11 @@ def get_video_formats(url: str) -> Dict:
             ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = _extract_info_with_pinterest_fallback(
+                ydl,
+                url,
+                download=False,
+            )
 
             result['title'] = info.get('title', 'Неизвестно')
             result['duration'] = info.get('duration', 0)
