@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("BOT_TOKEN", "test-token")
 
 from utils import media_feedback
+from utils.keyboard import get_video_quality_keyboard
 
 
 class MediaFeedbackTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +67,42 @@ class MediaFeedbackTests(unittest.IsolatedAsyncioTestCase):
         photo = message.answer_photo.await_args.kwargs["photo"]
         self.assertTrue(str(photo.path).endswith("Ошибка загрузки аудио.png"))
         message.answer.assert_not_awaited()
+
+
+class VideoQualityKeyboardTests(unittest.TestCase):
+    def test_safe_qualities_are_ordered_from_low_to_high(self):
+        keyboard = get_video_quality_keyboard(
+            "https://example.com/video",
+            [
+                {
+                    "quality_label": "1080p",
+                    "format_id": "r1920x1080",
+                    "width": 1920,
+                    "height": 1080,
+                },
+                {
+                    "quality_label": "360p",
+                    "format_id": "r640x360",
+                    "width": 640,
+                    "height": 360,
+                },
+                {
+                    "quality_label": "720p",
+                    "format_id": "r1280x720",
+                    "width": 1280,
+                    "height": 720,
+                },
+            ],
+            "Video",
+            request_id="request",
+        )
+
+        quality_buttons = keyboard.inline_keyboard[0]
+        self.assertEqual(
+            [button.text for button in quality_buttons],
+            ["🎬 360p", "🎬 720p", "🎬 1080p"],
+        )
+
 
 
 if __name__ == "__main__":
