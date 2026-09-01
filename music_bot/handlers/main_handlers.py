@@ -266,13 +266,6 @@ async def _send_soundcloud_collection(
                 source_url=item.get("source_url"),
             )
 
-    await edit_media_status(
-        status_msg,
-        f"✅ Сборник <b>{html.escape(collection_title)}</b> загружен: "
-        f"{len(prepared)}/{total} трек(ов).",
-        parse_mode="HTML",
-    )
-
     if failures:
         failure_lines = "\n".join(
             f"• {item['index']}. {html.escape(item['title'])}: "
@@ -284,11 +277,22 @@ async def _send_soundcloud_collection(
             if len(failures) > 10
             else ""
         )
-        await message.answer(
-            "⚠️ Не все треки удалось загрузить:\n"
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            f"⚠️ Сборник <b>{html.escape(collection_title)}</b> загружен частично: "
+            f"{len(prepared)}/{total} трек(ов).\n"
             f"{failure_lines}{more}",
-            parse_mode="HTML",
         )
+        return
+
+    await edit_media_status(
+        status_msg,
+        f"✅ Сборник <b>{html.escape(collection_title)}</b> загружен: "
+        f"{len(prepared)}/{total} трек(ов).",
+        parse_mode="HTML",
+    )
 
 
 # Регулярное выражение для мгновенного перехвата ссылок из любых соцсетей (работает без кнопок и меню)
@@ -346,7 +350,12 @@ async def cmd_start(message: Message, state: FSMContext):
                 user_id=message.from_user.id,
             )
         else:
-            await message.answer("❌ Некорректная ссылка на трек.")
+            await send_media_error(
+                message,
+                None,
+                "audio",
+                "❌ Некорректная ссылка на трек.",
+            )
         return
 
     if start_parameter.startswith("album_"):
@@ -403,8 +412,11 @@ async def send_cached_album_page(message: Message, album_key: str):
     """Shows an album cover and per-track deep links without downloading it yet."""
     album = get_album(album_key)
     if not album:
-        await message.answer(
-            "❌ Данные альбома устарели. Вернитесь в inline-поиск и откройте альбом ещё раз."
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Данные альбома устарели. Вернитесь в inline-поиск и откройте альбом ещё раз.",
         )
         return
 
@@ -415,10 +427,24 @@ async def send_cached_album_page(message: Message, album_key: str):
         "⏳ Получаю состав альбома...",
         parse_mode="HTML",
     )
-    tracks = await _load_cached_album_tracks(album)
+    try:
+        tracks = await _load_cached_album_tracks(album)
+    except Exception as error:
+        logger.exception("Error loading cached album %s: %s", album_key, error)
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            "❌ Не удалось получить список треков альбома. Попробуйте повторить поиск позже.",
+        )
+        return
+
     if not tracks:
-        await status_msg.edit_text(
-            "❌ В этом альбоме не удалось найти треки для загрузки."
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            "❌ В этом альбоме не удалось найти треки для загрузки.",
         )
         return
 
@@ -442,13 +468,13 @@ async def send_cached_album_page(message: Message, album_key: str):
 
     if thumbnail and len(chunks) == 1 and len(chunks[0]) <= 1000:
         try:
-            await status_msg.delete()
             await message.answer_photo(
                 photo=thumbnail,
                 caption=chunks[0],
                 parse_mode="HTML",
                 reply_markup=markup,
             )
+            await close_media_status(status_msg)
             return
         except Exception as error:
             logger.warning("Could not send album cover %s: %s", thumbnail, error)
@@ -537,14 +563,33 @@ async def send_cached_album_track(
     """Downloads one album track selected through its private-chat hyperlink."""
     album = get_album(album_key)
     if not album:
-        await message.answer(
-            "❌ Ссылка на трек устарела. Повторите поиск через inline-режим."
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Ссылка на трек устарела. Повторите поиск через inline-режим.",
         )
         return
 
-    tracks = await _load_cached_album_tracks(album)
+    try:
+        tracks = await _load_cached_album_tracks(album)
+    except Exception as error:
+        logger.exception("Error loading cached album %s: %s", album_key, error)
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Не удалось получить список треков альбома. Попробуйте повторить поиск позже.",
+        )
+        return
+
     if track_index < 1 or track_index > len(tracks):
-        await message.answer("❌ Трек не найден в сохранённом альбоме.")
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Трек не найден в сохранённом альбоме.",
+        )
         return
 
     track = tracks[track_index - 1]
@@ -564,9 +609,11 @@ async def send_cached_album_track(
         await status_msg.delete()
     except Exception as error:
         logger.exception("Error downloading album track %s: %s", track_index, error)
-        await status_msg.edit_text(
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
             f"❌ Не удалось загрузить трек: {html.escape(str(error))}",
-            parse_mode="HTML",
         )
 
 
@@ -578,15 +625,32 @@ async def download_cached_album(
     """Downloads every cached album track in its original order."""
     album = get_album(album_key)
     if not album:
-        await message.answer(
-            "❌ Данные альбома устарели. Повторите поиск через inline-режим."
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Данные альбома устарели. Повторите поиск через inline-режим.",
         )
         return
 
-    tracks = await _load_cached_album_tracks(album)
+    try:
+        tracks = await _load_cached_album_tracks(album)
+    except Exception as error:
+        logger.exception("Error loading cached album %s: %s", album_key, error)
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Не удалось получить список треков альбома. Попробуйте повторить поиск позже.",
+        )
+        return
+
     if not tracks:
-        await message.answer(
-            "❌ В этом альбоме не удалось найти треки для загрузки."
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ В этом альбоме не удалось найти треки для загрузки.",
         )
         return
 
@@ -618,16 +682,23 @@ async def download_cached_album(
             failures.append((index, track.get("title") or "Неизвестно", str(error)))
 
     if failures:
-        await status_msg.edit_text(
-            f"⚠️ Альбом <b>{html.escape(album_title)}</b>: "
-            f"загружено {len(tracks) - len(failures)}/{len(tracks)}.",
-            parse_mode="HTML",
+        failure_lines = "\n".join(
+            f"• {index}. {html.escape(title)}: {html.escape(error)}"
+            for index, title, error in failures[:10]
         )
-        for index, title, error in failures[:10]:
-            await message.answer(
-                f"• {index}. {html.escape(title)}: {html.escape(error)}",
-                parse_mode="HTML",
-            )
+        more = (
+            f"\n…и ещё {len(failures) - 10}"
+            if len(failures) > 10
+            else ""
+        )
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            f"⚠️ Альбом <b>{html.escape(album_title)}</b> загружен частично: "
+            f"{len(tracks) - len(failures)}/{len(tracks)}.\n"
+            f"{failure_lines}{more}",
+        )
     else:
         await status_msg.edit_text(
             f"✅ Альбом <b>{html.escape(album_title)}</b> загружен.",
@@ -697,8 +768,21 @@ async def handle_video_link(message: Message, state: FSMContext):
         local_temp_dir=None,
     )
     
-    formats_result = await asyncio.to_thread(get_video_formats, url)
-    if not formats_result['success'] or not formats_result['formats']:
+    try:
+        formats_result = await asyncio.to_thread(get_video_formats, url)
+    except Exception as error:
+        logger.exception("Error preparing video formats for %s: %s", url, error)
+        await send_media_error(
+            message,
+            msg,
+            "video",
+            "❌ Произошла ошибка при подготовке видео. Проверьте ссылку или попробуйте позже.",
+            reply_markup=get_back_keyboard(),
+        )
+        await state.clear()
+        return
+
+    if not formats_result.get('success') or not formats_result.get('formats'):
         error_text = html.escape(
             formats_result.get('error') or 'Доступные форматы не найдены.'
         )
@@ -751,7 +835,13 @@ async def download_selected_video(callback: CallbackQuery, state: FSMContext):
     video_url = await resolve_video_request(callback, state, request_id)
     
     if not video_url:
-        await callback.answer("❌ Не удалось прочитать ссылку из сообщения с кнопками.", show_alert=True)
+        await callback.answer()
+        await send_media_error(
+            callback.message,
+            None,
+            "video",
+            "❌ Не удалось прочитать ссылку из сообщения с кнопками. Отправьте ссылку заново.",
+        )
         return
 
     await callback.answer()
@@ -833,7 +923,13 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
     video_url = await resolve_video_request(callback, state, request_id)
     
     if not video_url:
-        await callback.answer("❌ Не удалось прочитать ссылку из сообщения с кнопками.", show_alert=True)
+        await callback.answer()
+        await send_media_error(
+            callback.message,
+            None,
+            "audio",
+            "❌ Не удалось прочитать ссылку из сообщения с кнопками. Отправьте видео заново.",
+        )
         return
 
     await callback.answer()
@@ -1174,7 +1270,13 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
         local_temp_dir = None
     
     if not url and not local_video_path:
-        await callback.answer("❌ Ошибка: ссылка или файл потеряны. Отправьте видео заново.", show_alert=True)
+        await callback.answer()
+        await send_media_error(
+            callback.message,
+            None,
+            "audio",
+            "❌ Ссылка или файл потеряны. Отправьте видео заново.",
+        )
         await state.clear()
         return
 
@@ -1283,36 +1385,77 @@ async def process_upload_cover(callback: CallbackQuery, state: FSMContext):
 @router.message(StateFilter(MediaStates.waiting_for_audio_file), F.audio)
 async def handle_custom_audio(message: Message, state: FSMContext):
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
-    os.makedirs(user_temp_dir, exist_ok=True)
-    
-    audio_path = os.path.join(user_temp_dir, f"{message.audio.file_unique_id}.mp3")
-    file = await message.bot.get_file(message.audio.file_id)
-    await message.bot.download_file(file.file_path, audio_path)
-    
-    await state.update_data(audio_path=audio_path, temp_dir=user_temp_dir)
-    await message.answer(
-        "✅ Аудио получено! Теперь отправьте картинку для обложки (желательно квадратную):",
-        reply_markup=get_back_keyboard()
+    status_msg = await send_media_progress(
+        message,
+        "⏳ Сохраняю аудиофайл для обработки...",
     )
-    await state.set_state(MediaStates.waiting_for_cover)
+
+    try:
+        os.makedirs(user_temp_dir, exist_ok=True)
+        audio_path = os.path.join(
+            user_temp_dir,
+            f"{message.audio.file_unique_id}.mp3",
+        )
+        file = await message.bot.get_file(message.audio.file_id)
+        await message.bot.download_file(file.file_path, audio_path)
+
+        await state.update_data(audio_path=audio_path, temp_dir=user_temp_dir)
+        await close_media_status(status_msg)
+        await message.answer(
+            "✅ Аудио получено! Теперь отправьте картинку для обложки (желательно квадратную):",
+            reply_markup=get_back_keyboard(),
+        )
+        await state.set_state(MediaStates.waiting_for_cover)
+    except Exception as error:
+        logger.exception("Error receiving custom audio: %s", error)
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            "❌ Не удалось загрузить аудиофайл. Попробуйте отправить файл ещё раз.",
+            reply_markup=get_back_keyboard(),
+        )
+        await cleanup_temp_files(user_temp_dir)
+        await state.clear()
 
 @router.message(StateFilter(MediaStates.waiting_for_cover), F.photo)
 async def handle_custom_cover(message: Message, state: FSMContext):
-    data = await state.get_data()
-    user_temp_dir = data['temp_dir']
-    
-    cover_path = os.path.join(user_temp_dir, "cover.jpg")
-    photo = message.photo[-1]
-    file = await message.bot.get_file(photo.file_id)
-    await message.bot.download_file(file.file_path, cover_path)
-    
-    await state.update_data(cover_path=cover_path)
-    await message.answer(
-        "✅ Обложка загружена!\n\nТеперь отправьте название трека и исполнителя в формате:\n<code>Название - Исполнитель</code>",
-        reply_markup=get_back_keyboard(),
-        parse_mode="HTML"
+    status_msg = await send_media_progress(
+        message,
+        "⏳ Сохраняю обложку...",
     )
-    await state.set_state(MediaStates.waiting_for_track_info)
+    data = await state.get_data()
+    user_temp_dir = data.get("temp_dir")
+
+    try:
+        if not user_temp_dir:
+            raise RuntimeError("Папка обработки аудио потеряна")
+
+        cover_path = os.path.join(user_temp_dir, "cover.jpg")
+        photo = message.photo[-1]
+        file = await message.bot.get_file(photo.file_id)
+        await message.bot.download_file(file.file_path, cover_path)
+
+        await state.update_data(cover_path=cover_path)
+        await close_media_status(status_msg)
+        await message.answer(
+            "✅ Обложка загружена!\n\nТеперь отправьте название трека и исполнителя в формате:\n<code>Название - Исполнитель</code>",
+            reply_markup=get_back_keyboard(),
+            parse_mode="HTML",
+        )
+        await state.set_state(MediaStates.waiting_for_track_info)
+    except Exception as error:
+        logger.exception("Error receiving custom cover: %s", error)
+        await send_media_error(
+            message,
+            status_msg,
+            "audio",
+            "❌ Не удалось загрузить обложку. Начните обработку аудио заново.",
+            reply_markup=get_back_keyboard(),
+        )
+        if user_temp_dir:
+            await cleanup_temp_files(user_temp_dir)
+        await state.clear()
 
 @router.message(StateFilter(MediaStates.waiting_for_track_info), F.text)
 async def handle_custom_track_info(message: Message, state: FSMContext):
