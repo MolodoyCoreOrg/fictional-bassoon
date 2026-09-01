@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaAudio
 from aiogram.fsm.context import FSMContext
 
 # Импортируем состояния, клавиатуры и утилиты
@@ -30,7 +30,12 @@ from utils.video_downloader import (
     get_video_formats, download_video, download_audio_from_video, 
     detect_platform, extract_audio_from_local_video
 )
-from utils.music_downloader import download_from_url, get_album_tracks
+from utils.music_downloader import (
+    download_from_url,
+    get_album_tracks,
+    get_soundcloud_collection,
+    is_soundcloud_collection_url,
+)
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
 from utils.album_cache import get_album
 from utils.media_request_cache import get_media_request, save_media_request
@@ -71,6 +76,214 @@ async def _send_video_to_chat(message: Message, result: dict, caption: str) -> N
         parse_mode="HTML",
         request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
     )
+
+
+TELEGRAM_AUDIO_GROUP_LIMIT = 10
+
+
+def _audio_group_batches(items: list[dict]) -> list[list[dict]]:
+    """Splits prepared tracks without changing their SoundCloud order."""
+    return [
+        items[index:index + TELEGRAM_AUDIO_GROUP_LIMIT]
+        for index in range(0, len(items), TELEGRAM_AUDIO_GROUP_LIMIT)
+    ]
+
+
+def _collection_batch_caption(
+    collection_title: str,
+    collection_artist: str,
+    batch_index: int,
+    batch_count: int,
+    sent_total: int,
+) -> str:
+    part = f" · часть {batch_index}/{batch_count}" if batch_count > 1 else ""
+    return (
+        f"💿 <b>{html.escape(collection_title)}</b>{part}\n"
+        f"👤 {html.escape(collection_artist)}\n"
+        f"🎵 {sent_total} трек(ов) в порядке SoundCloud\n\n"
+        f"❤️ @GG_Loader_bot"
+    )
+
+
+async def _send_soundcloud_collection(
+    message: Message,
+    status_msg: Message,
+    collection: dict,
+    temp_dir: str,
+) -> None:
+    """Downloads an ordered Set and sends audio groups containing at most 10 files."""
+    collection_title = collection.get("title") or "SoundCloud Set"
+    collection_artist = collection.get("artist") or "Неизвестно"
+    tracks = collection.get("tracks") or []
+    total = int(collection.get("total") or len(tracks))
+
+    if collection.get("truncated"):
+        raise RuntimeError(
+            f"В сборнике {total} трек(ов), а безопасный лимит одной задачи — "
+            f"{collection.get('limit')} треков. Увеличьте AUDIO_COLLECTION_MAX_TRACKS "
+            "и повторите загрузку."
+        )
+    if not tracks:
+        raise RuntimeError("В сборнике SoundCloud не найдено доступных треков.")
+
+    prepared = []
+    failures = []
+    unavailable = int(collection.get("unavailable") or 0)
+    if unavailable:
+        failures.append({
+            "index": "—",
+            "title": f"Недоступные треки: {unavailable}",
+            "error": "SoundCloud не вернул метаданные или доступ к файлу",
+        })
+
+    for index, track in enumerate(tracks, start=1):
+        display_index = track.get("track_number") or index
+        track_title = track.get("title") or "Неизвестно"
+        await status_msg.edit_text(
+            f"💿 <b>{html.escape(collection_title)}</b>\n"
+            f"⏳ Загружаю {display_index}/{total}: {html.escape(track_title)}",
+            parse_mode="HTML",
+        )
+
+        track_temp_dir = os.path.join(temp_dir, f"track_{index:03d}")
+        os.makedirs(track_temp_dir, exist_ok=True)
+        try:
+            result = await download_from_url(track.get("url"), track_temp_dir)
+            if not result.get("success"):
+                failures.append({
+                    "index": display_index,
+                    "title": track_title,
+                    "error": result.get("error") or "неизвестная ошибка",
+                })
+                continue
+
+            title = result.get("title") or track_title
+            performer = (
+                result.get("artist")
+                or track.get("artist")
+                or collection_artist
+            )
+            audio_path = result["audio_path"]
+            cover_path = result.get("thumbnail_path")
+            if cover_path and os.path.exists(cover_path):
+                try:
+                    audio_path = await add_cover_to_mp3(
+                        audio_path,
+                        cover_path,
+                        title,
+                        performer,
+                    )
+                except Exception as cover_error:
+                    logger.warning(
+                        "Could not embed cover for SoundCloud track %s: %s",
+                        index,
+                        cover_error,
+                    )
+
+            duration = track.get("duration")
+            try:
+                duration = int(duration) if duration is not None else None
+            except (TypeError, ValueError):
+                duration = None
+
+            prepared.append({
+                "index": display_index,
+                "title": title,
+                "performer": performer,
+                "audio_path": audio_path,
+                "duration": duration,
+                "source_url": track.get("url"),
+            })
+        except Exception as error:
+            logger.error(
+                "Error downloading SoundCloud collection track %s/%s: %s",
+                index,
+                len(tracks),
+                error,
+            )
+            failures.append({
+                "index": display_index,
+                "title": track_title,
+                "error": str(error),
+            })
+
+    if not prepared:
+        details = "; ".join(
+            f"{item['index']}. {item['title']}: {item['error']}"
+            for item in failures[:5]
+        )
+        raise RuntimeError(
+            f"Ни один трек сборника не удалось загрузить. {details}"
+        )
+
+    batches = _audio_group_batches(prepared)
+    for batch_index, batch in enumerate(batches, start=1):
+        caption = _collection_batch_caption(
+            collection_title,
+            collection_artist,
+            batch_index,
+            len(batches),
+            len(prepared),
+        )
+
+        if len(batch) == 1:
+            item = batch[0]
+            sent_messages = [await message.bot.send_audio(
+                chat_id=message.chat.id,
+                audio=_telegram_media_input(item["audio_path"]),
+                title=item["title"],
+                performer=item["performer"],
+                duration=item["duration"],
+                caption=caption,
+                parse_mode="HTML",
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+            )]
+        else:
+            media = []
+            for item_index, item in enumerate(batch):
+                media.append(InputMediaAudio(
+                    media=_telegram_media_input(item["audio_path"]),
+                    title=item["title"],
+                    performer=item["performer"],
+                    duration=item["duration"],
+                    caption=caption if item_index == 0 else None,
+                    parse_mode="HTML" if item_index == 0 else None,
+                ))
+            sent_messages = await message.bot.send_media_group(
+                chat_id=message.chat.id,
+                media=media,
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+            )
+
+        for item, sent_message in zip(batch, sent_messages):
+            await remember_audio_message(
+                message.from_user.id,
+                sent_message,
+                source_url=item.get("source_url"),
+            )
+
+    await status_msg.edit_text(
+        f"✅ Сборник <b>{html.escape(collection_title)}</b> загружен: "
+        f"{len(prepared)}/{total} трек(ов).",
+        parse_mode="HTML",
+    )
+
+    if failures:
+        failure_lines = "\n".join(
+            f"• {item['index']}. {html.escape(item['title'])}: "
+            f"{html.escape(item['error'])}"
+            for item in failures[:10]
+        )
+        more = (
+            f"\n…и ещё {len(failures) - 10}"
+            if len(failures) > 10
+            else ""
+        )
+        await message.answer(
+            "⚠️ Не все треки удалось загрузить:\n"
+            f"{failure_lines}{more}",
+            parse_mode="HTML",
+        )
 
 
 # Регулярное выражение для мгновенного перехвата ссылок из любых соцсетей (работает без кнопок и меню)
@@ -440,7 +653,7 @@ async def download_audio_from_video_btn(callback: CallbackQuery, state: FSMConte
 @router.callback_query(F.data == "download_audio")
 async def process_download_audio(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "🎵 <b>Загрузка аудио</b>\n\nОтправьте мне ссылку на трек (SoundCloud, VK, Yandex Music, YouTube Music, Spotify и др.):",
+        "🎵 <b>Загрузка аудио</b>\n\nОтправьте мне ссылку на трек или сборник SoundCloud (VK, Yandex Music, YouTube Music, Spotify и др.):",
         reply_markup=get_back_keyboard(), parse_mode="HTML"
     )
     await state.set_state(MediaStates.waiting_for_audio_link)
@@ -457,6 +670,31 @@ async def handle_audio_link(message: Message, state: FSMContext):
     os.makedirs(user_temp_dir, exist_ok=True)
     
     try:
+        if is_soundcloud_collection_url(url):
+            try:
+                collection = await get_soundcloud_collection(url)
+                if collection:
+                    await _send_soundcloud_collection(
+                        message,
+                        msg,
+                        collection,
+                        user_temp_dir,
+                    )
+                    return
+            except Exception as collection_error:
+                logger.error(
+                    "Error handling SoundCloud collection: %s",
+                    collection_error,
+                )
+                await send_media_error(
+                    message,
+                    msg,
+                    "audio",
+                    f"❌ Ошибка загрузки сборника: "
+                    f"{html.escape(str(collection_error))}",
+                )
+                return
+
         result = await download_from_url(url, user_temp_dir)
         if result['success']:
             audio_path = result['audio_path']

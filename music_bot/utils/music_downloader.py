@@ -58,6 +58,7 @@ def _extract_info_sync(ydl, url_or_query, download=False):
 
 
 CATALOG_SEARCH_SCHEME = 'catalogsearch'
+SOUNDCLOUD_HOSTS = {'soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com'}
 
 
 CATALOG_HOSTS = {
@@ -125,6 +126,19 @@ class _PageMetadataParser(HTMLParser):
 
 def _url_host(url: str) -> str:
     return (urlparse(url).hostname or '').lower().removeprefix('www.')
+
+
+def is_soundcloud_collection_url(url: str) -> bool:
+    """Recognizes public SoundCloud Set links, including short share links."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or '').lower().removeprefix('www.')
+    return (
+        host in SOUNDCLOUD_HOSTS
+        and (
+            host == 'on.soundcloud.com'
+            or '/sets/' in parsed.path.lower()
+        )
+    )
 
 
 def _is_vk_audio_url(url: str) -> bool:
@@ -1128,6 +1142,174 @@ async def find_track_album(title: str, artist: str) -> dict | None:
     except Exception as error:
         logger.info("Album lookup unavailable for %s - %s: %s", artist, title, error)
         return None
+
+
+def _configured_collection_limit() -> int:
+    """Bounds one requested collection to avoid unbounded server work."""
+    try:
+        value = int(os.getenv('AUDIO_COLLECTION_MAX_TRACKS', '100'))
+    except ValueError:
+        value = 100
+    return max(1, min(value, 200))
+
+
+def _normalize_soundcloud_collection_track(
+    entry: dict,
+    index: int,
+    fallback_artist: str,
+) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+
+    url = (
+        entry.get('webpage_url')
+        or entry.get('original_url')
+        or entry.get('url')
+    )
+    if not _is_http_url(url):
+        return None
+
+    title = _clean_metadata_value(entry.get('track') or entry.get('title'))
+    if not title:
+        return None
+
+    artist = _clean_metadata_value(
+        entry.get('artist')
+        or entry.get('uploader')
+        or entry.get('channel')
+        or fallback_artist
+    ) or 'Неизвестно'
+    thumbnail = entry.get('thumbnail')
+    if not thumbnail and entry.get('thumbnails'):
+        thumbnails = entry.get('thumbnails') or []
+        if thumbnails:
+            thumbnail = thumbnails[-1].get('url')
+
+    return {
+        'title': title,
+        'artist': artist,
+        'url': url,
+        'duration': entry.get('duration'),
+        'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
+        'track_number': entry.get('playlist_index') or index,
+    }
+
+
+def _soundcloud_collection_from_info(
+    info: dict | None,
+    source_url: str,
+    limit: int,
+) -> dict | None:
+    """Converts yt-dlp Set metadata without changing the platform order."""
+    if not isinstance(info, dict):
+        return None
+
+    raw_entries = list(info.get('entries') or [])
+    extractor_name = str(
+        info.get('extractor_key') or info.get('extractor') or ''
+    ).casefold()
+    resolved_url = info.get('webpage_url') or info.get('original_url') or source_url
+    is_collection = (
+        info.get('_type') == 'playlist'
+        or 'soundcloudset' in extractor_name
+        or '/sets/' in urlparse(str(resolved_url)).path.lower()
+    )
+    if not is_collection or not raw_entries:
+        return None
+
+    fallback_artist = _clean_metadata_value(
+        info.get('artist') or info.get('uploader') or info.get('channel')
+    ) or 'Неизвестно'
+    tracks = []
+    for index, entry in enumerate(raw_entries[:limit], start=1):
+        track = _normalize_soundcloud_collection_track(
+            entry,
+            index=index,
+            fallback_artist=fallback_artist,
+        )
+        if track:
+            tracks.append(track)
+
+    if not tracks:
+        return None
+
+    declared_total = info.get('playlist_count') or info.get('n_entries')
+    try:
+        total = max(int(declared_total), len(raw_entries))
+    except (TypeError, ValueError):
+        total = len(raw_entries)
+    total = max(total, len(tracks))
+
+    thumbnail = info.get('thumbnail')
+    if not thumbnail and info.get('thumbnails'):
+        thumbnails = info.get('thumbnails') or []
+        if thumbnails:
+            thumbnail = thumbnails[-1].get('url')
+
+    return {
+        'title': _clean_metadata_value(
+            info.get('playlist_title') or info.get('title')
+        ) or 'SoundCloud Set',
+        'artist': fallback_artist,
+        'url': resolved_url,
+        'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
+        'tracks': tracks,
+        'total': total,
+        'unavailable': max(0, total - len(tracks)),
+        'truncated': total > limit or len(raw_entries) > limit,
+        'limit': limit,
+    }
+
+
+async def get_soundcloud_collection(
+    url: str,
+    limit: int | None = None,
+) -> dict | None:
+    """Reads a SoundCloud Set as ordered lightweight track references."""
+    if not is_soundcloud_collection_url(url):
+        return None
+
+    collection_limit = limit or _configured_collection_limit()
+    ydl_opts = {
+        **get_anti_block_opts(),
+        # SoundCloudSetIE flat entries can contain only an API URL and track ID.
+        # Resolve track metadata, but never download media during this first pass.
+        'extract_flat': False,
+        'skip_download': True,
+        'playlistend': collection_limit + 1,
+        'noplaylist': False,
+        'socket_timeout': 20,
+    }
+    if FFMPEG_LOCATION:
+        ydl_opts['ffmpeg_location'] = FFMPEG_LOCATION
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_extract_info_sync, ydl, url, False),
+                timeout=max(45, min(collection_limit * 3, 300)),
+            )
+    except Exception as error:
+        logger.warning('SoundCloud collection loading error for %s: %s', url, error)
+        raise RuntimeError(
+            f'Не удалось прочитать сборник SoundCloud: {error}'
+        ) from error
+
+    collection = _soundcloud_collection_from_info(
+        info,
+        source_url=url,
+        limit=collection_limit,
+    )
+    if not collection:
+        # A short on.soundcloud.com link can also point to one ordinary track.
+        # In that case the caller must continue through the single-track path.
+        if _url_host(url) == 'on.soundcloud.com':
+            return None
+        raise RuntimeError(
+            'SoundCloud не вернул состав сборника. '
+            'Проверьте, что Set публичный и ссылка доступна без входа.'
+        )
+    return collection
 
 
 async def _get_deezer_album_tracks(
