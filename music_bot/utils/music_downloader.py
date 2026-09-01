@@ -65,6 +65,33 @@ CATALOG_HOSTS = {
     'music.apple.com',
     'music.yandex.ru',
     'music.yandex.com',
+    'deezer.com',
+    'deezer.page.link',
+    'tidal.com',
+    'listen.tidal.com',
+    'qobuz.com',
+    'play.qobuz.com',
+    'pandora.com',
+    'napster.com',
+}
+
+SERVICE_METADATA_VALUES = {
+    'яндекс музыка',
+    'yandex music',
+    'собираем музыку для вас',
+    'музыка для вас',
+    'vk',
+    'vk музыка',
+    'vk music',
+    'вконтакте',
+    'spotify',
+    'apple music',
+    'deezer',
+    'tidal',
+    'qobuz',
+    'amazon music',
+    'pandora',
+    'napster',
 }
 
 
@@ -109,8 +136,13 @@ def _is_vk_audio_url(url: str) -> bool:
 
 
 def _is_catalog_reference(url: str) -> bool:
-    """True for catalogue pages that do not expose their original media file."""
-    return _url_host(url) in CATALOG_HOSTS or _is_vk_audio_url(url)
+    """True for catalogue pages that need exact metadata before media lookup."""
+    host = _url_host(url)
+    return (
+        host in CATALOG_HOSTS
+        or host.startswith('music.amazon.')
+        or _is_vk_audio_url(url)
+    )
 
 
 def _catalog_search_url(title: str, artist: str) -> str:
@@ -137,12 +169,40 @@ def _uses_site_cookies(url: str) -> bool:
 def _clean_metadata_value(value: str | None) -> str | None:
     if not value:
         return None
-    cleaned = re.sub(r'\s+', ' ', unescape(value)).strip(' \t\r\n-|')
+    without_markup = re.sub(r'<[^>]+>', ' ', unescape(str(value)))
+    cleaned = re.sub(r'\s+', ' ', without_markup).strip(' \t\r\n-|')
     return cleaned or None
 
 
+def _metadata_key(value: str | None) -> str:
+    value = _clean_metadata_value(value) or ''
+    return re.sub(r'[^\w]+', ' ', value.casefold(), flags=re.UNICODE).strip()
+
+
+def _metadata_is_usable(metadata: dict | None) -> bool:
+    """Rejects provider landing-page copy that must never become a search query."""
+    if not metadata:
+        return False
+
+    title = _metadata_key(metadata.get('title'))
+    artist = _metadata_key(metadata.get('artist'))
+    if len(title) < 2 or title in SERVICE_METADATA_VALUES:
+        return False
+    if artist in SERVICE_METADATA_VALUES:
+        return False
+
+    combined = f'{title} {artist}'.strip()
+    placeholder_phrases = (
+        'собираем музыку для вас',
+        'слушайте музыку',
+        'music for everyone',
+        'listen to music',
+    )
+    return not any(phrase in combined for phrase in placeholder_phrases)
+
+
 def _split_catalog_title(label: str | None, description: str | None, host: str) -> tuple[str | None, str | None]:
-    """Extracts title/artist from common Spotify, Apple, Yandex and VK labels."""
+    """Extracts title/artist from common music-catalogue labels."""
     label = _clean_metadata_value(label)
     description = _clean_metadata_value(description)
     if not label:
@@ -178,14 +238,23 @@ def _split_catalog_title(label: str | None, description: str | None, host: str) 
         if len(parts) == 2:
             return _clean_metadata_value(parts[1]), _clean_metadata_value(parts[0])
 
+    service_name = r'(?:Spotify|Apple Music|Яндекс Музыка|Yandex Music|VK Музыка|VK Music|Deezer|TIDAL|Qobuz|Amazon Music|Pandora|Napster)'
+    label = re.sub(rf'\s*[|·]\s*{service_name}\s*$', '', label, flags=re.IGNORECASE)
+    match = re.match(
+        rf'^(.*?)\s+(?:by|от)\s+(.+?)(?:\s+on\s+{service_name})?$',
+        label,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return _clean_metadata_value(match.group(1)), _clean_metadata_value(match.group(2))
+
     artist = None
     if description:
         match = re.search(r'(?:song|track|песн(?:я|ю))\s+(?:by|от)\s+([^|.]+)', description, re.IGNORECASE)
         if match:
             artist = _clean_metadata_value(match.group(1))
 
-    generic_labels = {'vk', 'вконтакте', 'spotify', 'apple music', 'яндекс музыка', 'yandex music'}
-    title = label if label.lower() not in generic_labels else None
+    title = label if _metadata_key(label) not in SERVICE_METADATA_VALUES else None
     return title, artist
 
 
@@ -216,6 +285,177 @@ def _cookies_for_url(url: str) -> dict:
     except OSError as error:
         logger.warning(f'Не удалось прочитать cookies-файл: {error}')
     return cookies
+
+
+def _yandex_track_ids(url: str) -> tuple[str | None, str | None]:
+    path = urlparse(url).path
+    track_match = re.search(r'/track/(\d+)', path)
+    album_match = re.search(r'/album/(\d+)', path)
+    return (
+        track_match.group(1) if track_match else None,
+        album_match.group(1) if album_match else None,
+    )
+
+
+def _metadata_from_yandex_payload(payload: dict) -> dict | None:
+    result = payload.get('result') if isinstance(payload, dict) else None
+    if isinstance(result, list):
+        track = next((item for item in result if isinstance(item, dict)), None)
+    elif isinstance(result, dict):
+        tracks = result.get('tracks') or result.get('items') or []
+        track = next((item for item in tracks if isinstance(item, dict)), None)
+        if not track and result.get('title'):
+            track = result
+    else:
+        track = payload.get('track') if isinstance(payload, dict) else None
+        if not track and isinstance(payload, dict) and payload.get('title'):
+            track = payload
+
+    if not isinstance(track, dict):
+        return None
+
+    artists = ', '.join(
+        name
+        for name in (
+            _clean_metadata_value(artist.get('name'))
+            for artist in (track.get('artists') or [])
+            if isinstance(artist, dict)
+        )
+        if name
+    ) or None
+    albums = [album for album in (track.get('albums') or []) if isinstance(album, dict)]
+    album = albums[0] if albums else {}
+    cover_uri = track.get('coverUri') or album.get('coverUri')
+    thumbnail = None
+    if cover_uri:
+        thumbnail = str(cover_uri).replace('%%', '1000x1000')
+        if thumbnail.startswith('//'):
+            thumbnail = f'https:{thumbnail}'
+        elif not thumbnail.startswith(('http://', 'https://')):
+            thumbnail = f'https://{thumbnail.lstrip("/")}'
+
+    album_id = album.get('id')
+    metadata = {
+        'title': _clean_metadata_value(track.get('title')),
+        'artist': artists,
+        'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
+        'album': _clean_metadata_value(album.get('title')),
+        'album_url': (
+            f'https://music.yandex.ru/album/{album_id}'
+            if album_id is not None
+            else None
+        ),
+    }
+    return metadata if _metadata_is_usable(metadata) else None
+
+
+async def _fetch_yandex_track_metadata(url: str) -> dict | None:
+    track_id, album_id = _yandex_track_ids(url)
+    if not track_id:
+        return None
+
+    requests = [
+        (f'https://api.music.yandex.net/tracks/{track_id}', None),
+        (
+            'https://music.yandex.ru/handlers/track.jsx',
+            {
+                'track': f'{track_id}:{album_id}' if album_id else track_id,
+                'lang': 'ru',
+            },
+        ),
+    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; GG-Loader/1.0)',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+    }
+    timeout = aiohttp.ClientTimeout(total=10)
+    errors = []
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        for endpoint, params in requests:
+            try:
+                async with session.get(endpoint, params=params) as response:
+                    response.raise_for_status()
+                    metadata = _metadata_from_yandex_payload(
+                        await response.json(content_type=None)
+                    )
+                if metadata:
+                    return metadata
+                errors.append(f'{endpoint}: пустые метаданные')
+            except Exception as error:
+                errors.append(f'{endpoint}: {error}')
+
+    raise RuntimeError('; '.join(errors))
+
+
+def _vk_audio_reference(url: str) -> str | None:
+    match = re.search(
+        r'/audio(-?\d+)_(\d+)(?:_([A-Za-z0-9]+))?',
+        urlparse(url).path,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return '_'.join(part for part in match.groups() if part)
+
+
+async def _fetch_vk_track_metadata(url: str) -> dict | None:
+    reference = _vk_audio_reference(url)
+    access_token = os.getenv('VK_ACCESS_TOKEN', '').strip()
+    if not reference or not access_token:
+        return None
+
+    params = {
+        'audios': reference,
+        'access_token': access_token,
+        'v': os.getenv('VK_API_VERSION', '5.199').strip() or '5.199',
+    }
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://api.vk.com/method/audio.getById',
+            params=params,
+        ) as response:
+            payload = await response.json(content_type=None)
+
+    if payload.get('error'):
+        error = payload['error']
+        raise RuntimeError(
+            f"VK API {error.get('error_code')}: {error.get('error_msg')}"
+        )
+
+    items = payload.get('response') or []
+    item = next((entry for entry in items if isinstance(entry, dict)), None)
+    if not item:
+        return None
+
+    album = item.get('album') or {}
+    thumb = album.get('thumb') or {}
+    thumbnail = next(
+        (
+            thumb.get(name)
+            for name in ('photo_1200', 'photo_600', 'photo_300', 'photo_270')
+            if _is_http_url(thumb.get(name))
+        ),
+        None,
+    )
+    metadata = {
+        'title': _clean_metadata_value(item.get('title')),
+        'artist': _clean_metadata_value(item.get('artist')),
+        'thumbnail': thumbnail,
+        'album': _clean_metadata_value(album.get('title')),
+        'album_url': None,
+        'download_url': item.get('url') if _is_http_url(item.get('url')) else None,
+    }
+    return metadata if _metadata_is_usable(metadata) else None
+
+
+async def _fetch_provider_metadata(url: str) -> dict | None:
+    host = _url_host(url)
+    if host.startswith('music.yandex.'):
+        return await _fetch_yandex_track_metadata(url)
+    if _is_vk_audio_url(url):
+        return await _fetch_vk_track_metadata(url)
+    return None
 
 
 async def _fetch_page_metadata(url: str) -> dict:
@@ -261,6 +501,7 @@ async def _fetch_page_metadata(url: str) -> dict:
     )
     description = parser.metadata.get('og:description') or parser.metadata.get('twitter:description')
     title, artist = _split_catalog_title(label, description, _url_host(url))
+    artist = artist or _clean_metadata_value(extra.get('author_name'))
     thumbnail = (
         parser.metadata.get('og:image')
         or parser.metadata.get('twitter:image')
@@ -274,18 +515,58 @@ async def _fetch_page_metadata(url: str) -> dict:
 
 
 async def _resolve_catalog_metadata(url: str) -> dict:
-    try:
-        metadata = await _fetch_page_metadata(url)
-    except Exception as error:
-        logger.warning(f'Catalogue metadata loading error for {url}: {error}')
-        metadata = {}
+    """Resolves exact track metadata and rejects generic provider landing pages."""
+    errors = []
 
-    if not metadata.get('title'):
-        raise ValueError(
-            'Не удалось прочитать название трека по этой ссылке. '
-            'Убедитесь, что трек публичный; для закрытых VK-страниц добавьте актуальный cookies.txt.'
-        )
-    return metadata
+    try:
+        provider_metadata = await _fetch_provider_metadata(url)
+        if _metadata_is_usable(provider_metadata):
+            return provider_metadata
+    except Exception as error:
+        logger.warning('Provider metadata loading error for %s: %s', url, error)
+        errors.append(str(error))
+
+    opts = {
+        **get_anti_block_opts(use_cookies=_uses_site_cookies(url)),
+        'skip_download': True,
+        'noplaylist': True,
+        'socket_timeout': 15,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_extract_info_sync, ydl, url, False),
+                timeout=25,
+            )
+        extracted = _metadata_from_info(info)
+        if _metadata_is_usable(extracted):
+            return extracted
+        errors.append('экстрактор вернул служебные метаданные площадки')
+    except Exception as error:
+        logger.info('yt-dlp metadata extraction failed for %s: %s', url, error)
+        errors.append(str(error))
+
+    try:
+        page_metadata = await _fetch_page_metadata(url)
+        if _metadata_is_usable(page_metadata):
+            return page_metadata
+        errors.append('страница не содержит точного названия трека')
+    except Exception as error:
+        logger.warning('Catalogue metadata loading error for %s: %s', url, error)
+        errors.append(str(error))
+
+    vk_hint = (
+        ' Для VK Audio укажите пользовательский VK_ACCESS_TOKEN с доступом '
+        'к audio.getById либо добавьте актуальный cookies.txt.'
+        if _is_vk_audio_url(url) and not os.getenv('VK_ACCESS_TOKEN', '').strip()
+        else ''
+    )
+    details = '; '.join(message for message in errors if message)
+    raise ValueError(
+        'Не удалось получить точные название и исполнителя по этой ссылке; '
+        'случайный похожий трек отправлен не будет.'
+        f'{vk_hint} Подробности: {details}'
+    )
 
 
 def _catalog_search_query(metadata: dict) -> str:
@@ -300,25 +581,71 @@ def _normalize_match_text(value: str | None) -> str:
     return re.sub(r'[^\w]+', ' ', value.casefold(), flags=re.UNICODE).strip()
 
 
-def _candidate_match_score(metadata: dict, entry: dict) -> float:
-    """Keeps provider order but tries the closest title/artist match first."""
-    wanted = _normalize_match_text(
-        ' '.join(
-            value for value in (metadata.get('artist'), metadata.get('title')) if value
-        )
-    )
-    candidate = _normalize_match_text(
-        ' '.join(
-            value for value in (
-                entry.get('artist') or entry.get('uploader') or entry.get('channel'),
-                entry.get('title'),
-            )
-            if value
-        )
-    )
-    if not wanted or not candidate:
+def _text_match_score(wanted: str | None, candidate: str | None) -> float:
+    wanted_text = _normalize_match_text(wanted)
+    candidate_text = _normalize_match_text(candidate)
+    if not wanted_text or not candidate_text:
         return 0.0
-    return SequenceMatcher(None, wanted, candidate).ratio()
+    if wanted_text == candidate_text:
+        return 1.0
+
+    sequence_score = SequenceMatcher(None, wanted_text, candidate_text).ratio()
+    wanted_tokens = set(wanted_text.split())
+    candidate_tokens = set(candidate_text.split())
+    containment_score = (
+        len(wanted_tokens & candidate_tokens) / len(wanted_tokens)
+        if wanted_tokens
+        else 0.0
+    )
+    return max(sequence_score, containment_score)
+
+
+def _candidate_match_score(metadata: dict, entry: dict) -> float:
+    """Scores title and artist separately so unrelated search hits are rejected."""
+    wanted_title = metadata.get('title')
+    wanted_artist = metadata.get('artist')
+    candidate_title = entry.get('track') or entry.get('title')
+    candidate_artist = (
+        entry.get('artist') or entry.get('uploader') or entry.get('channel')
+    )
+    candidate_combined = ' '.join(
+        value for value in (candidate_artist, candidate_title) if value
+    )
+
+    title_score = max(
+        _text_match_score(wanted_title, candidate_title),
+        _text_match_score(wanted_title, candidate_combined),
+    )
+    if wanted_artist:
+        artist_score = max(
+            _text_match_score(wanted_artist, candidate_artist),
+            _text_match_score(wanted_artist, candidate_combined),
+        )
+        score = (title_score * 0.7) + (artist_score * 0.3)
+    else:
+        score = title_score
+
+    wanted_key = _metadata_key(f'{wanted_artist or ""} {wanted_title or ""}')
+    candidate_key = _metadata_key(candidate_combined)
+    variant_markers = {
+        'remix', 'cover', 'karaoke', 'instrumental', 'live',
+        'sped up', 'slowed', 'nightcore', 'ремикс', 'кавер', 'караоке',
+        'инструментал', 'концерт',
+    }
+    if any(
+        marker in candidate_key and marker not in wanted_key
+        for marker in variant_markers
+    ):
+        score -= 0.2
+    return max(0.0, min(score, 1.0))
+
+
+def _configured_min_match() -> float:
+    try:
+        value = float(os.getenv('AUDIO_FALLBACK_MIN_MATCH', '0.78'))
+    except ValueError:
+        value = 0.78
+    return max(0.5, min(value, 1.0))
 
 
 def _candidate_download_target(entry: dict, source: str) -> str | None:
@@ -335,8 +662,8 @@ def _candidate_download_target(entry: dict, source: str) -> str | None:
 
 async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
     """
-    Searches several candidates per provider. This avoids making catalogue links
-    depend on a single unavailable SoundCloud result or one blocked YouTube CDN URL.
+    Searches several candidates per provider and downloads only a sufficiently
+    close title/artist match. A failed lookup must never become a random track.
     """
     query = _catalog_search_query(metadata)
     if not query:
@@ -344,6 +671,7 @@ async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
 
     errors = {}
     seen_targets = set()
+    minimum_score = _configured_min_match()
     try:
         candidate_limit = int(os.getenv('AUDIO_FALLBACK_CANDIDATES', '3'))
     except ValueError:
@@ -363,16 +691,38 @@ async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
             errors[source_name] = 'ничего не найдено'
             continue
 
-        ordered_entries = sorted(
-            (entry for entry in entries if entry),
-            key=lambda entry: _candidate_match_score(metadata, entry),
+        scored_entries = sorted(
+            (
+                (_candidate_match_score(metadata, entry), entry)
+                for entry in entries
+                if entry
+            ),
+            key=lambda item: item[0],
             reverse=True,
         )
-        for entry in ordered_entries:
+        eligible_entries = [
+            (score, entry)
+            for score, entry in scored_entries
+            if score >= minimum_score
+        ]
+        if not eligible_entries:
+            best_score = scored_entries[0][0] if scored_entries else 0.0
+            errors[source_name] = (
+                f'нет точного совпадения '
+                f'(лучшее {best_score:.2f}, минимум {minimum_score:.2f})'
+            )
+            continue
+
+        for score, entry in eligible_entries:
             target = _candidate_download_target(entry, source)
             if not target or target in seen_targets:
                 continue
             seen_targets.add(target)
+            logger.info(
+                'Downloading verified %s candidate with match score %.2f',
+                source_name,
+                score,
+            )
             try:
                 info = await _download_info(
                     target,
@@ -394,7 +744,10 @@ async def _download_catalog_match(metadata: dict, temp_dir: str) -> dict:
     details = '; '.join(
         f'{source}: {message}' for source, message in errors.items()
     ) or 'источники поиска не настроены'
-    raise RuntimeError(f'Не удалось найти доступную версию трека. {details}')
+    raise RuntimeError(
+        'Не удалось найти достаточно точное совпадение; '
+        f'случайный трек отправлен не будет. {details}'
+    )
 
 
 def _unwrap_download_info(info: dict | None) -> dict:
@@ -438,32 +791,8 @@ def _metadata_from_info(info: dict | None) -> dict:
 
 
 async def _extract_reference_metadata(url: str) -> dict:
-    """Extracts metadata even when the media CDN itself rejects the download."""
-    extraction_error = None
-    opts = {
-        **get_anti_block_opts(use_cookies=_uses_site_cookies(url)),
-        'skip_download': True,
-        'noplaylist': True,
-        'socket_timeout': 15,
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await asyncio.wait_for(
-                asyncio.to_thread(_extract_info_sync, ydl, url, False),
-                timeout=25,
-            )
-        metadata = _metadata_from_info(info)
-        if metadata.get('title'):
-            return metadata
-    except Exception as error:
-        extraction_error = error
-        logger.info('yt-dlp metadata extraction failed for %s: %s', url, error)
-
-    try:
-        return await _resolve_catalog_metadata(url)
-    except Exception as page_error:
-        details = extraction_error or page_error
-        raise RuntimeError(f'Не удалось извлечь название и автора трека: {details}') from page_error
+    """Extracts trustworthy metadata for a failed direct media URL."""
+    return await _resolve_catalog_metadata(url)
 
 
 def _is_youtube_target(target: str) -> bool:
@@ -594,9 +923,8 @@ async def _download_thumbnail(url: str | None, temp_dir: str) -> str | None:
 async def download_from_url(url: str, temp_dir: str) -> dict:
     """
     Downloads audio directly where a platform exposes it. Catalogue-only links
-    (VK Audio, Spotify, Apple Music) are resolved to metadata and matched against
-    an accessible audio provider. Yandex Music uses its direct extractor first
-    and automatically falls back to matching when that extractor is unavailable.
+    are resolved to exact provider metadata and matched against an accessible
+    audio source only when title/artist similarity passes the safety threshold.
     """
     result = {
         'success': False,
@@ -622,9 +950,24 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         if internal_metadata:
             metadata = internal_metadata
             info = await _download_catalog_match(metadata, temp_dir)
-        elif _is_catalog_reference(url) and not _url_host(url).startswith('music.yandex.'):
+        elif _is_catalog_reference(url):
             metadata = await _resolve_catalog_metadata(url)
-            info = await _download_catalog_match(metadata, temp_dir)
+            direct_target = metadata.get('download_url')
+            if direct_target:
+                try:
+                    info = await _download_info(
+                        direct_target,
+                        temp_dir,
+                        use_cookies=False,
+                    )
+                except Exception as direct_error:
+                    logger.warning(
+                        'Exact provider URL failed, using verified fallback: %s',
+                        direct_error,
+                    )
+                    info = await _download_catalog_match(metadata, temp_dir)
+            else:
+                info = await _download_catalog_match(metadata, temp_dir)
         else:
             try:
                 info = await _download_info(
@@ -680,8 +1023,8 @@ async def download_from_url(url: str, temp_dir: str) -> dict:
         # Album metadata is resolved only after the user chooses a result. This
         # keeps inline search fast while still allowing an album deep-link on
         # the audio message.
-        result['album'] = info.get('album')
-        result['album_url'] = info.get('album_url')
+        result['album'] = metadata.get('album') or info.get('album')
+        result['album_url'] = metadata.get('album_url') or info.get('album_url')
         if result['album'] and not result['album_url']:
             playlist_url = info.get('playlist_url')
             playlist_title = info.get('playlist_title') or info.get('playlist')
