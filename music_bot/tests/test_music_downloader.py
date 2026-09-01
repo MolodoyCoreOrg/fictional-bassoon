@@ -33,6 +33,12 @@ class CatalogueMetadataTests(unittest.TestCase):
     def test_apple_track_id_handles_song_and_album_track_links(self):
         self.assertEqual(
             music_downloader._apple_track_id(
+                "https://music.apple.com/ru/song/1724932498"
+            ),
+            "1724932498",
+        )
+        self.assertEqual(
+            music_downloader._apple_track_id(
                 "https://music.apple.com/ru/song/track/1724932498"
             ),
             "1724932498",
@@ -79,6 +85,34 @@ class CatalogueMetadataTests(unittest.TestCase):
         self.assertEqual(
             metadata["album_url"],
             "https://itunes.apple.com/lookup?id=1724932497&entity=song&limit=200",
+        )
+
+    def test_provider_payloads_never_fall_back_to_a_different_track_id(self):
+        self.assertIsNone(
+            music_downloader._metadata_from_yandex_payload(
+                {
+                    "result": [{
+                        "id": 1,
+                        "title": "Другой трек",
+                        "durationMs": 1000,
+                        "artists": [{"name": "Другой артист"}],
+                        "albums": [{"id": 2, "title": "Album"}],
+                    }]
+                },
+                "38072589",
+            )
+        )
+        self.assertIsNone(
+            music_downloader._metadata_from_itunes_payload(
+                {
+                    "results": [{
+                        "trackId": 1,
+                        "trackName": "Wrong",
+                        "artistName": "Wrong Artist",
+                    }]
+                },
+                "1724932498",
+            )
         )
 
     def test_vk_artist_and_title_are_parsed(self):
