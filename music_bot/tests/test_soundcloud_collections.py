@@ -1,6 +1,8 @@
 import os
+import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("BOT_TOKEN", "test-token")
 
@@ -128,6 +130,57 @@ class TelegramAudioGroupBatchTests(unittest.TestCase):
             [item["index"] for batch in batches for item in batch],
             list(range(1, 22)),
         )
+
+
+class AlbumAudioDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_album_track_uses_aiogram_thumbnail_keyword(self):
+        sent_audio = SimpleNamespace()
+        bot = SimpleNamespace(send_audio=AsyncMock(return_value=sent_audio))
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=42),
+            bot=bot,
+        )
+        download_result = {
+            "success": True,
+            "audio_path": "track.mp3",
+            "title": "Track",
+            "artist": "Artist",
+            "thumbnail_path": None,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(main_handlers, "TEMP_DIR", temp_dir),
+                patch.object(main_handlers, "TELEGRAM_LOCAL_FILE_MODE", False),
+                patch.object(
+                    main_handlers,
+                    "download_from_url",
+                    AsyncMock(return_value=download_result),
+                ),
+                patch.object(
+                    main_handlers,
+                    "cleanup_temp_files",
+                    AsyncMock(),
+                ),
+                patch.object(
+                    main_handlers,
+                    "remember_audio_message",
+                    AsyncMock(),
+                ),
+            ):
+                result = await main_handlers._download_and_send_album_track(
+                    message,
+                    {"album": "Album", "artist": "Artist"},
+                    {"url": "https://example.com/track"},
+                    1,
+                    1,
+                    user_id=42,
+                )
+
+        self.assertIs(result, sent_audio)
+        kwargs = bot.send_audio.await_args.kwargs
+        self.assertIn("thumbnail", kwargs)
+        self.assertNotIn("thumb", kwargs)
 
 
 if __name__ == "__main__":
