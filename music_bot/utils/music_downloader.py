@@ -58,7 +58,7 @@ def _extract_info_sync(ydl, url_or_query, download=False):
 
 
 CATALOG_SEARCH_SCHEME = 'catalogsearch'
-SOUNDCLOUD_HOSTS = {'soundcloud.com', 'on.soundcloud.com'}
+SOUNDCLOUD_HOSTS = {'soundcloud.com', 'm.soundcloud.com', 'on.soundcloud.com'}
 
 
 CATALOG_HOSTS = {
