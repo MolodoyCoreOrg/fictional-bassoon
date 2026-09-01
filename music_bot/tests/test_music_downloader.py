@@ -106,6 +106,62 @@ class CatalogueMetadataTests(unittest.TestCase):
         )
 
 
+class PublicCatalogueSearchTests(unittest.TestCase):
+    def test_yandex_search_item_preserves_album_metadata(self):
+        entry = music_downloader._yandex_search_entry({
+            "id": 150686486,
+            "title": "Паук",
+            "durationMs": 125000,
+            "artists": [{"name": "oracle"}],
+            "albums": [{"id": 41769045, "title": "Album"}],
+            "coverUri": "avatars.yandex.net/get-music-content/123/%%",
+        })
+
+        self.assertEqual(entry["artist"], "oracle")
+        self.assertEqual(entry["duration"], 125)
+        self.assertEqual(
+            entry["album_url"],
+            "https://music.yandex.ru/album/41769045",
+        )
+
+    def test_deezer_search_item_has_album_tracks_endpoint(self):
+        entry = music_downloader._deezer_search_entry({
+            "id": 10,
+            "title": "Track",
+            "duration": 180,
+            "link": "https://www.deezer.com/track/10",
+            "artist": {"name": "Artist"},
+            "album": {
+                "id": 20,
+                "title": "Album",
+                "cover_big": "https://example.com/cover.jpg",
+            },
+        })
+
+        self.assertEqual(
+            entry["album_url"],
+            "https://api.deezer.com/album/20/tracks",
+        )
+
+    def test_itunes_search_item_has_downloadable_catalog_reference(self):
+        entry = music_downloader._itunes_search_entry({
+            "trackId": 10,
+            "trackName": "Track",
+            "artistName": "Artist",
+            "trackViewUrl": "https://music.apple.com/ru/album/album/20?i=10",
+            "collectionId": 20,
+            "collectionName": "Album",
+            "trackTimeMillis": 181000,
+            "artworkUrl100": "https://example.com/100x100bb.jpg",
+        })
+
+        self.assertEqual(entry["duration"], 181)
+        self.assertEqual(
+            entry["album_url"],
+            "https://itunes.apple.com/lookup?id=20&entity=song&limit=200",
+        )
+
+
 class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_yandex_uses_exact_metadata_and_tries_multiple_candidates(self):
         calls = []
@@ -331,7 +387,14 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("AUDIO_SEARCH_SOURCES", None)
             self.assertEqual(
                 music_downloader._configured_search_sources(),
-                ("scsearch", "vksearch", "ytsearch"),
+                (
+                    "scsearch",
+                    "yandexsearch",
+                    "vksearch",
+                    "deezersearch",
+                    "itunessearch",
+                    "ytsearch",
+                ),
             )
 
     def test_youtube_retry_profiles_include_hls_and_cookie_free_client(self):
