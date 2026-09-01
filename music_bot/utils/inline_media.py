@@ -76,8 +76,10 @@ def create_inline_media_url(track: dict) -> tuple[str, str] | tuple[None, None]:
 
 def _track_source_url(track: dict) -> str:
     source_url = track.get("download_url") or track.get("url") or ""
-    if not isinstance(source_url, str) or not source_url.startswith(("https://", "http://")):
-        raise ValueError("Track does not contain a downloadable HTTP URL")
+    if not isinstance(source_url, str) or not source_url.startswith(
+        ("https://", "http://", "catalogsearch:?")
+    ):
+        raise ValueError("Track does not contain a supported download reference")
     return source_url
 
 
