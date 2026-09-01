@@ -6,6 +6,8 @@ services:
       - .env
     environment:
       YTDLP_JS_RUNTIME: deno
+      # Override stale .env values from the previous deployment recipe.
+      YOUTUBE_PLAYER_CLIENT: ""
       YOUTUBE_POT_PROVIDER_URL: http://bgutil-provider:4416
     depends_on:
       bgutil-provider:
