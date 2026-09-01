@@ -102,7 +102,8 @@ class SoundCloudCollectionExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         options = ydl_class.call_args.args[0]
         self.assertFalse(options["noplaylist"])
-        self.assertEqual(options["extract_flat"], "in_playlist")
+        self.assertFalse(options["extract_flat"])
+        self.assertTrue(options["skip_download"])
         self.assertEqual(options["playlistend"], 101)
         self.assertEqual(len(collection["tracks"]), 7)
 
