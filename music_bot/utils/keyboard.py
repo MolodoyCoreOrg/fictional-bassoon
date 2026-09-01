@@ -100,3 +100,36 @@ def get_inline_album_keyboard(album_title: str, album_key: str) -> InlineKeyboar
     return create_keyboard([
         [create_button(f"💿 {safe_title}", url=f"https://t.me/{BOT_USERNAME}?start=album_{album_key}")]
     ])
+
+
+
+def get_inline_result_keyboard(
+    track_key: str,
+    album_title: str | None = None,
+    album_key: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Download action for article fallbacks plus an optional album link."""
+    buttons = [[
+        create_button(
+            "⬇️ Скачать трек",
+            url=f"https://t.me/{BOT_USERNAME}?start=track_{track_key}_1",
+        )
+    ]]
+    if album_title and album_key:
+        buttons.append([
+            create_button(
+                f"💿 {album_title.strip() or 'Альбом'}",
+                url=f"https://t.me/{BOT_USERNAME}?start=album_{album_key}",
+            )
+        ])
+    return create_keyboard(buttons)
+
+
+def get_album_download_keyboard(album_key: str) -> InlineKeyboardMarkup:
+    """Starts downloading every track from an album page."""
+    return create_keyboard([[
+        create_button(
+            "🎼 Скачать весь альбом",
+            callback_data=f"album_download_all:{album_key}",
+        )
+    ]])
