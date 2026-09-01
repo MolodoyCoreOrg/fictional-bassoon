@@ -22,7 +22,9 @@ from utils.config import (
     TEMP_DIR,
 )
 from utils.keyboard import (
-    get_welcome_menu, get_back_keyboard, 
+    BOT_USERNAME,
+    get_album_download_keyboard,
+    get_welcome_menu, get_back_keyboard,
     get_about_guchi_keyboard, get_video_quality_keyboard,
     get_extract_format_keyboard, get_skip_channel_keyboard
 )
@@ -330,12 +332,29 @@ async def cmd_start(message: Message, state: FSMContext):
     command_parts = (message.text or "").split(maxsplit=1)
     start_parameter = command_parts[1].strip() if len(command_parts) > 1 else ""
 
+    if start_parameter.startswith("track_"):
+        payload = start_parameter.removeprefix("track_")
+        album_key, separator, index_text = payload.rpartition("_")
+        if separator and index_text.isdigit():
+            await send_cached_album_track(
+                message,
+                album_key,
+                int(index_text),
+                user_id=message.from_user.id,
+            )
+        else:
+            await message.answer("❌ Некорректная ссылка на трек.")
+        return
+
     if start_parameter.startswith("album_"):
-        await send_cached_album(message, start_parameter.removeprefix("album_"))
+        await send_cached_album_page(
+            message,
+            start_parameter.removeprefix("album_"),
+        )
         return
 
     user_name = message.from_user.first_name
-    
+
     welcome_text = (
         f"Привет, {user_name}! 👋\n\n"
         "Это бот музыкального объединения <b>ГУЧИГЕНГОВО</b>. "
@@ -347,105 +366,282 @@ async def cmd_start(message: Message, state: FSMContext):
         "4. Отправь ссылку мне (или выбери пункт в меню ниже), и я пришлю тебе готовый файл! 👇\n\n"
         "💡 <i>А ещё ты можешь просто прислать мне любую ссылку на видео в чат, без нажатий кнопок!</i>"
     )
-    
+
     await message.answer(welcome_text, reply_markup=get_welcome_menu(), parse_mode="HTML")
 
 
-async def send_cached_album(message: Message, album_key: str):
-    """Sends every cached album track to the private chat in album order."""
+async def _load_cached_album_tracks(album: dict) -> list:
+    tracks = album.get("tracks") or []
+    if not tracks and album.get("album_url"):
+        tracks = await get_album_tracks(
+            album["album_url"],
+            fallback_artist=album.get("artist") or "Неизвестно",
+        )
+        album["tracks"] = tracks
+    return tracks
+
+
+def _album_page_chunks(header: str, track_lines: list[str], limit: int = 3900) -> list[str]:
+    chunks = []
+    current = header
+    for line in track_lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def send_cached_album_page(message: Message, album_key: str):
+    """Shows an album cover and per-track deep links without downloading it yet."""
     album = get_album(album_key)
     if not album:
         await message.answer(
-            "❌ Данные альбома устарели. Вернитесь в чат, заново выберите трек через inline-поиск и нажмите кнопку альбома ещё раз."
+            "❌ Данные альбома устарели. Вернитесь в inline-поиск и откройте альбом ещё раз."
         )
         return
 
-    tracks = album.get("tracks") or []
     album_title = album.get("album") or "Альбом"
     artist = album.get("artist") or "Неизвестно"
-
     status_msg = await message.answer(
         f"💿 <b>{html.escape(album_title)}</b>\n"
         "⏳ Получаю состав альбома...",
         parse_mode="HTML",
     )
-
-    # Состав альбома загружается только после перехода по deep-link. Раньше
-    # каждый альбом извлекался прямо во время inline-поиска и Telegram не
-    # успевал получить результаты.
-    if not tracks and album.get("album_url"):
-        tracks = await get_album_tracks(
-            album["album_url"],
-            fallback_artist=artist,
-        )
-        album["tracks"] = tracks
-
+    tracks = await _load_cached_album_tracks(album)
     if not tracks:
         await status_msg.edit_text(
             "❌ В этом альбоме не удалось найти треки для загрузки."
         )
         return
 
-    total = len(tracks)
+    header = (
+        f"💿 <b>{html.escape(artist)} — {html.escape(album_title)}</b>\n"
+        f"🎵 {len(tracks)} трек(ов)\n"
+    )
+    track_lines = []
+    for index, track in enumerate(tracks, start=1):
+        title = html.escape(track.get("title") or "Неизвестно")
+        deep_link = (
+            f"https://t.me/{BOT_USERNAME}?start=track_{album_key}_{index}"
+        )
+        track_lines.append(
+            f'{index}. <a href="{html.escape(deep_link, quote=True)}">{title}</a>'
+        )
+
+    chunks = _album_page_chunks(header, track_lines)
+    markup = get_album_download_keyboard(album_key)
+    thumbnail = album.get("thumbnail")
+
+    if thumbnail and len(chunks) == 1 and len(chunks[0]) <= 1000:
+        try:
+            await status_msg.delete()
+            await message.answer_photo(
+                photo=thumbnail,
+                caption=chunks[0],
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+        except Exception as error:
+            logger.warning("Could not send album cover %s: %s", thumbnail, error)
+
     await status_msg.edit_text(
-        f"💿 <b>{html.escape(album_title)}</b> — нашёл {total} трек(ов).\n"
-        "Начинаю загружать по порядку альбома...",
+        chunks[0],
+        parse_mode="HTML",
+        reply_markup=markup if len(chunks) == 1 else None,
+        disable_web_page_preview=True,
+    )
+    for chunk_index, chunk in enumerate(chunks[1:], start=1):
+        await message.answer(
+            chunk,
+            parse_mode="HTML",
+            reply_markup=markup if chunk_index == len(chunks) - 1 else None,
+            disable_web_page_preview=True,
+        )
+
+
+async def _download_and_send_album_track(
+    message: Message,
+    album: dict,
+    track: dict,
+    index: int,
+    total: int,
+    user_id: int,
+):
+    album_title = album.get("album") or "Альбом"
+    artist = album.get("artist") or "Неизвестно"
+    user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
+    os.makedirs(user_temp_dir, exist_ok=True)
+    try:
+        source_url = track.get("download_url") or track.get("url")
+        result = await download_from_url(source_url, user_temp_dir)
+        if not result.get("success"):
+            raise RuntimeError(result.get("error") or "неизвестная ошибка")
+
+        title = result.get("title") or track.get("title") or "Неизвестно"
+        performer = result.get("artist") or track.get("artist") or artist
+        audio_path = result["audio_path"]
+        cover_path = result.get("thumbnail_path")
+        if cover_path and os.path.exists(cover_path):
+            audio_path = await add_cover_to_mp3(
+                audio_path,
+                cover_path,
+                title,
+                performer,
+            )
+
+        caption = (
+            f"💿 <b>{html.escape(album_title)}</b>\n"
+            f"{index}/{total}. 🎵 {html.escape(title)}\n"
+            f"👤 {html.escape(performer)}\n\n"
+            "❤️ @GG_Loader_bot"
+        )
+        sent_audio = await message.bot.send_audio(
+            chat_id=message.chat.id,
+            audio=_telegram_media_input(audio_path),
+            title=title,
+            performer=performer,
+            caption=caption,
+            parse_mode="HTML",
+            thumb=(
+                _telegram_media_input(cover_path)
+                if cover_path and os.path.exists(cover_path)
+                else None
+            ),
+            request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
+        )
+        await remember_audio_message(
+            user_id,
+            sent_audio,
+            source_url=source_url,
+        )
+        return sent_audio
+    finally:
+        await cleanup_temp_files(user_temp_dir)
+
+
+async def send_cached_album_track(
+    message: Message,
+    album_key: str,
+    track_index: int,
+    user_id: int,
+):
+    """Downloads one album track selected through its private-chat hyperlink."""
+    album = get_album(album_key)
+    if not album:
+        await message.answer(
+            "❌ Ссылка на трек устарела. Повторите поиск через inline-режим."
+        )
+        return
+
+    tracks = await _load_cached_album_tracks(album)
+    if track_index < 1 or track_index > len(tracks):
+        await message.answer("❌ Трек не найден в сохранённом альбоме.")
+        return
+
+    track = tracks[track_index - 1]
+    status_msg = await message.answer(
+        f"⏳ Загружаю: <b>{html.escape(track.get('title') or 'Неизвестно')}</b>",
         parse_mode="HTML",
     )
+    try:
+        await _download_and_send_album_track(
+            message,
+            album,
+            track,
+            track_index,
+            len(tracks),
+            user_id,
+        )
+        await status_msg.delete()
+    except Exception as error:
+        logger.exception("Error downloading album track %s: %s", track_index, error)
+        await status_msg.edit_text(
+            f"❌ Не удалось загрузить трек: {html.escape(str(error))}",
+            parse_mode="HTML",
+        )
 
+
+async def download_cached_album(
+    message: Message,
+    album_key: str,
+    user_id: int,
+):
+    """Downloads every cached album track in its original order."""
+    album = get_album(album_key)
+    if not album:
+        await message.answer(
+            "❌ Данные альбома устарели. Повторите поиск через inline-режим."
+        )
+        return
+
+    tracks = await _load_cached_album_tracks(album)
+    if not tracks:
+        await message.answer(
+            "❌ В этом альбоме не удалось найти треки для загрузки."
+        )
+        return
+
+    album_title = album.get("album") or "Альбом"
+    status_msg = await message.answer(
+        f"💿 <b>{html.escape(album_title)}</b>\n"
+        f"⏳ Начинаю загрузку {len(tracks)} трек(ов)...",
+        parse_mode="HTML",
+    )
+    failures = []
     for index, track in enumerate(tracks, start=1):
-        user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
-        os.makedirs(user_temp_dir, exist_ok=True)
+        await status_msg.edit_text(
+            f"💿 <b>{html.escape(album_title)}</b>\n"
+            f"⏳ Загружаю {index}/{len(tracks)}: "
+            f"{html.escape(track.get('title') or 'Неизвестно')}",
+            parse_mode="HTML",
+        )
         try:
-            await status_msg.edit_text(
-                f"💿 <b>{html.escape(album_title)}</b>\n"
-                f"⏳ Загружаю {index}/{total}: {html.escape(track.get('title') or 'Неизвестно')}",
-                parse_mode="HTML"
+            await _download_and_send_album_track(
+                message,
+                album,
+                track,
+                index,
+                len(tracks),
+                user_id,
             )
+        except Exception as error:
+            logger.exception("Error sending album track %s/%s", index, len(tracks))
+            failures.append((index, track.get("title") or "Неизвестно", str(error)))
 
-            result = await download_from_url(track.get("url"), user_temp_dir)
-            if not result["success"]:
-                await message.answer(
-                    f"⚠️ Не удалось загрузить {index}/{total}: {html.escape(track.get('title') or 'Неизвестно')}\n"
-                    f"Причина: {html.escape(result.get('error') or 'неизвестная ошибка')}",
-                    parse_mode="HTML"
-                )
-                continue
-
-            title = result.get("title") or track.get("title") or "Неизвестно"
-            performer = result.get("artist") or track.get("artist") or artist
-            audio_path = result["audio_path"]
-            cover_path = result.get("thumbnail_path")
-
-            if cover_path and os.path.exists(cover_path):
-                audio_path = await add_cover_to_mp3(audio_path, cover_path, title, performer)
-
-            caption = (
-                f"💿 <b>{html.escape(album_title)}</b>\n"
-                f"{index}/{total}. 🎵 {html.escape(title)}\n"
-                f"👤 {html.escape(performer)}\n\n"
-                f"❤️ @GG_Loader_bot"
-            )
-            sent_audio = await message.answer_audio(
-                audio=FSInputFile(audio_path),
-                title=title,
-                performer=performer,
-                caption=caption,
+    if failures:
+        await status_msg.edit_text(
+            f"⚠️ Альбом <b>{html.escape(album_title)}</b>: "
+            f"загружено {len(tracks) - len(failures)}/{len(tracks)}.",
+            parse_mode="HTML",
+        )
+        for index, title, error in failures[:10]:
+            await message.answer(
+                f"• {index}. {html.escape(title)}: {html.escape(error)}",
                 parse_mode="HTML",
-                thumb=FSInputFile(cover_path) if cover_path and os.path.exists(cover_path) else None,
             )
-            await remember_audio_message(
-                message.from_user.id,
-                sent_audio,
-                source_url=track.get("url"),
-            )
-        except Exception as e:
-            logger.error(f"Error sending album track {index}/{total}: {e}")
-            await message.answer(f"⚠️ Ошибка при загрузке трека {index}/{total}.")
-        finally:
-            await cleanup_temp_files(user_temp_dir)
+    else:
+        await status_msg.edit_text(
+            f"✅ Альбом <b>{html.escape(album_title)}</b> загружен.",
+            parse_mode="HTML",
+        )
 
-    await status_msg.edit_text(f"✅ Альбом <b>{html.escape(album_title)}</b> загружен.", parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("album_download_all:"))
+async def download_album_callback(callback: CallbackQuery):
+    album_key = callback.data.split(":", 1)[1]
+    await callback.answer("Начинаю загрузку альбома")
+    await download_cached_album(
+        callback.message,
+        album_key,
+        user_id=callback.from_user.id,
+    )
+
 
 @router.callback_query(F.data == "back_to_menu")
 @router.callback_query(F.data == "cancel_action")
