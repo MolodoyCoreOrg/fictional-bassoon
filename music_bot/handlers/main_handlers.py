@@ -44,6 +44,7 @@ from utils.media_request_cache import get_media_request, save_media_request
 from utils.track_history import remember_audio_message
 from utils.media_feedback import (
     close_media_status,
+    edit_media_status,
     send_media_error,
     send_media_progress,
 )
@@ -141,7 +142,8 @@ async def _send_soundcloud_collection(
     for index, track in enumerate(tracks, start=1):
         display_index = track.get("track_number") or index
         track_title = track.get("title") or "Неизвестно"
-        await status_msg.edit_text(
+        await edit_media_status(
+            status_msg,
             f"💿 <b>{html.escape(collection_title)}</b>\n"
             f"⏳ Загружаю {display_index}/{total}: {html.escape(track_title)}",
             parse_mode="HTML",
@@ -264,7 +266,8 @@ async def _send_soundcloud_collection(
                 source_url=item.get("source_url"),
             )
 
-    await status_msg.edit_text(
+    await edit_media_status(
+        status_msg,
         f"✅ Сборник <b>{html.escape(collection_title)}</b> загружен: "
         f"{len(prepared)}/{total} трек(ов).",
         parse_mode="HTML",
@@ -508,7 +511,7 @@ async def _download_and_send_album_track(
             performer=performer,
             caption=caption,
             parse_mode="HTML",
-            thumb=(
+            thumbnail=(
                 _telegram_media_input(cover_path)
                 if cover_path and os.path.exists(cover_path)
                 else None
@@ -917,7 +920,7 @@ async def handle_audio_link(message: Message, state: FSMContext):
             sent_audio = await message.answer_audio(
                 audio=audio_file, title=title, performer=artist,
                 caption=caption,
-                parse_mode="HTML", thumb=thumb_file
+                parse_mode="HTML", thumbnail=thumb_file
             )
             await remember_audio_message(
                 message.from_user.id,
@@ -1235,7 +1238,7 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
                 sent_audio = await callback.message.answer_audio(
                     audio=audio_file, title=result['title'], performer=result['artist'],
                     caption=caption,
-                    parse_mode="HTML", thumb=thumb_file
+                    parse_mode="HTML", thumbnail=thumb_file
                 )
                 await remember_audio_message(
                     callback.from_user.id,
@@ -1393,7 +1396,7 @@ async def process_final_audio(
         sent_audio = await message.answer_audio(
             audio=audio_file, title=title, performer=artist,
             caption=caption,
-            parse_mode="HTML", thumb=thumb_file
+            parse_mode="HTML", thumbnail=thumb_file
         )
         history_user_id = user_id or message.from_user.id
         await remember_audio_message(history_user_id, sent_audio)
