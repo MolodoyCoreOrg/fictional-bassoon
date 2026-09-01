@@ -29,6 +29,30 @@ async def send_media_progress(message: Message, text: str) -> Message:
     return await message.answer(text, parse_mode="HTML")
 
 
+async def edit_media_status(
+    status_message: Message,
+    text: str,
+    *,
+    parse_mode: str = "HTML",
+    reply_markup=None,
+) -> Message:
+    """Edits either a text progress message or an animation caption."""
+    if (
+        getattr(status_message, "caption", None) is not None
+        or getattr(status_message, "animation", None) is not None
+    ):
+        return await status_message.edit_caption(
+            caption=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
+    return await status_message.edit_text(
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
+
+
 async def close_media_status(status_message: Optional[Message]) -> None:
     if not status_message:
         return

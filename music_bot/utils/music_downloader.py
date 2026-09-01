@@ -254,6 +254,16 @@ def _split_catalog_title(label: str | None, description: str | None, host: str) 
         label = re.sub(r'\s*\|\s*Spotify\s*$', '', label, flags=re.IGNORECASE)
 
     if host == 'music.apple.com':
+        # Russian Apple Music pages use a localized page title such as:
+        # Песня «Track (feat. Guest)» (Artist & Artist) в Apple Music.
+        match = re.match(
+            r'^(?:Песня|Song)\s+[«“"](.+?)[»”"]\s+\((.+?)\)\s+(?:в|on)\s+Apple Music$',
+            label,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return _clean_metadata_value(match.group(1)), _clean_metadata_value(match.group(2))
+
         match = re.match(r'^[\u200e]?(.*?)\s+-\s+Song by\s+(.+?)(?:\s+on Apple Music)?$', label, re.IGNORECASE)
         if match:
             return _clean_metadata_value(match.group(1)), _clean_metadata_value(match.group(2))
@@ -331,22 +341,53 @@ def _yandex_track_ids(url: str) -> tuple[str | None, str | None]:
     )
 
 
-def _metadata_from_yandex_payload(payload: dict) -> dict | None:
-    result = payload.get('result') if isinstance(payload, dict) else None
-    if isinstance(result, list):
-        track = next((item for item in result if isinstance(item, dict)), None)
-    elif isinstance(result, dict):
-        tracks = result.get('tracks') or result.get('items') or []
-        track = next((item for item in tracks if isinstance(item, dict)), None)
-        if not track and result.get('title'):
-            track = result
-    else:
-        track = payload.get('track') if isinstance(payload, dict) else None
-        if not track and isinstance(payload, dict) and payload.get('title'):
-            track = payload
+def _iter_yandex_track_candidates(payload):
+    """Yields track dictionaries from all currently used Yandex response shapes."""
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_yandex_track_candidates(item)
+        return
+    if not isinstance(payload, dict):
+        return
 
-    if not isinstance(track, dict):
+    looks_like_track = (
+        payload.get('title')
+        and isinstance(payload.get('artists'), list)
+        and (
+            'durationMs' in payload
+            or 'albums' in payload
+            or 'available' in payload
+            or 'realId' in payload
+        )
+    )
+    if looks_like_track:
+        yield payload
+
+    for key in ('result', 'track', 'tracks', 'items', 'results', 'volumes'):
+        nested = payload.get(key)
+        if nested is not None and nested is not payload:
+            yield from _iter_yandex_track_candidates(nested)
+
+
+def _metadata_from_yandex_payload(payload, track_id: str | None = None) -> dict | None:
+    candidates = list(_iter_yandex_track_candidates(payload))
+    if not candidates:
         return None
+
+    track = None
+    if track_id is not None:
+        wanted_id = str(track_id)
+        track = next(
+            (
+                item for item in candidates
+                if str(item.get('id') or item.get('realId') or '') == wanted_id
+            ),
+            None,
+        )
+        if track is None:
+            return None
+    else:
+        track = candidates[0]
 
     artists = ', '.join(
         name
@@ -388,30 +429,82 @@ async def _fetch_yandex_track_metadata(url: str) -> dict | None:
     if not track_id:
         return None
 
-    requests = [
-        (f'https://api.music.yandex.net/tracks/{track_id}', None),
-        (
-            'https://music.yandex.ru/handlers/track.jsx',
-            {
-                'track': f'{track_id}:{album_id}' if album_id else track_id,
-                'lang': 'ru',
-            },
-        ),
-    ]
-    headers = {
+    origin_host = _url_host(url)
+    handler_hosts = [origin_host]
+    alternate_host = (
+        'music.yandex.com'
+        if origin_host == 'music.yandex.ru'
+        else 'music.yandex.ru'
+    )
+    if alternate_host not in handler_hosts:
+        handler_hosts.append(alternate_host)
+
+    base_headers = {
         'User-Agent': 'Mozilla/5.0 (compatible; GG-Loader/1.0)',
         'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
     }
+    ajax_headers = {
+        **base_headers,
+        'Referer': url,
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-Retpath-Y': url,
+    }
+    requests = [
+        (
+            f'https://api.music.yandex.net/tracks/{track_id}',
+            None,
+            base_headers,
+        ),
+    ]
+    for host in handler_hosts:
+        base_url = f'https://{host}'
+        common_params = {
+            'lang': 'ru',
+            'external-domain': host,
+            'overembed': 'false',
+        }
+        requests.extend([
+            (
+                f'{base_url}/handlers/track-entries.jsx',
+                {
+                    **common_params,
+                    'entries': track_id,
+                    'strict': 'true',
+                },
+                ajax_headers,
+            ),
+            (
+                f'{base_url}/handlers/track.jsx',
+                {
+                    **common_params,
+                    'track': f'{track_id}:{album_id}' if album_id else track_id,
+                },
+                ajax_headers,
+            ),
+        ])
+        if album_id:
+            requests.append((
+                f'{base_url}/handlers/album.jsx',
+                {
+                    **common_params,
+                    'album': album_id,
+                },
+                ajax_headers,
+            ))
+
     timeout = aiohttp.ClientTimeout(total=10)
     errors = []
-    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-        for endpoint, params in requests:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for endpoint, params, request_headers in requests:
             try:
-                async with session.get(endpoint, params=params) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=request_headers,
+                ) as response:
                     response.raise_for_status()
-                    metadata = _metadata_from_yandex_payload(
-                        await response.json(content_type=None)
-                    )
+                    payload = await response.json(content_type=None)
+                metadata = _metadata_from_yandex_payload(payload, track_id)
                 if metadata:
                     return metadata
                 errors.append(f'{endpoint}: пустые метаданные')
@@ -483,10 +576,92 @@ async def _fetch_vk_track_metadata(url: str) -> dict | None:
     return metadata if _metadata_is_usable(metadata) else None
 
 
+def _apple_track_id(url: str) -> str | None:
+    """Extracts a song ID without mistaking an Apple album ID for a track."""
+    parsed = urlparse(url)
+    query_id = (parse_qs(parsed.query).get('i') or [None])[0]
+    if query_id and str(query_id).isdigit():
+        return str(query_id)
+
+    match = re.search(
+        r'/(?:song|music-video)/(?:[^/]+/)?(\d+)/?$',
+        parsed.path,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _metadata_from_itunes_payload(
+    payload: dict,
+    track_id: str | None = None,
+) -> dict | None:
+    results = payload.get('results') if isinstance(payload, dict) else None
+    candidates = [
+        item for item in (results or [])
+        if isinstance(item, dict)
+        and _clean_metadata_value(item.get('trackName'))
+        and _clean_metadata_value(item.get('artistName'))
+    ]
+    if track_id is not None:
+        wanted_id = str(track_id)
+        exact = next(
+            (
+                item for item in candidates
+                if str(item.get('trackId') or '') == wanted_id
+            ),
+            None,
+        )
+        if not exact:
+            return None
+        candidates = [exact]
+    if not candidates:
+        return None
+
+    item = candidates[0]
+    artwork = item.get('artworkUrl100')
+    if _is_http_url(artwork):
+        artwork = re.sub(r'/\d+x\d+bb\.', '/600x600bb.', artwork)
+    collection_id = item.get('collectionId')
+    metadata = {
+        'title': _clean_metadata_value(item.get('trackName')),
+        'artist': _clean_metadata_value(item.get('artistName')),
+        'thumbnail': artwork if _is_http_url(artwork) else None,
+        'album': _clean_metadata_value(item.get('collectionName')),
+        'album_url': (
+            f'https://itunes.apple.com/lookup?id={collection_id}&entity=song&limit=200'
+            if collection_id is not None
+            else None
+        ),
+    }
+    return metadata if _metadata_is_usable(metadata) else None
+
+
+async def _fetch_apple_track_metadata(url: str) -> dict | None:
+    track_id = _apple_track_id(url)
+    if not track_id:
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://itunes.apple.com/lookup',
+            params={
+                'id': track_id,
+                'entity': 'song',
+                'country': os.getenv('ITUNES_COUNTRY', 'RU').strip() or 'RU',
+            },
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+    return _metadata_from_itunes_payload(payload, track_id)
+
+
 async def _fetch_provider_metadata(url: str) -> dict | None:
     host = _url_host(url)
     if host.startswith('music.yandex.'):
         return await _fetch_yandex_track_metadata(url)
+    if host == 'music.apple.com':
+        return await _fetch_apple_track_metadata(url)
     if _is_vk_audio_url(url):
         return await _fetch_vk_track_metadata(url)
     return None
@@ -560,25 +735,30 @@ async def _resolve_catalog_metadata(url: str) -> dict:
         logger.warning('Provider metadata loading error for %s: %s', url, error)
         errors.append(str(error))
 
-    opts = {
-        **get_anti_block_opts(use_cookies=_uses_site_cookies(url)),
-        'skip_download': True,
-        'noplaylist': True,
-        'socket_timeout': 15,
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await asyncio.wait_for(
-                asyncio.to_thread(_extract_info_sync, ydl, url, False),
-                timeout=25,
-            )
-        extracted = _metadata_from_info(info)
-        if _metadata_is_usable(extracted):
-            return extracted
-        errors.append('экстрактор вернул служебные метаданные площадки')
-    except Exception as error:
-        logger.info('yt-dlp metadata extraction failed for %s: %s', url, error)
-        errors.append(str(error))
+    # The current yt-dlp Yandex extractor calls the same AJAX endpoint and
+    # can turn a non-fatal 404 into "argument of type bool is not iterable".
+    # Our provider resolver above already tries the API plus both regional AJAX
+    # hosts, so avoid repeating the broken extractor path for Yandex links.
+    if not _url_host(url).startswith('music.yandex.'):
+        opts = {
+            **get_anti_block_opts(use_cookies=_uses_site_cookies(url)),
+            'skip_download': True,
+            'noplaylist': True,
+            'socket_timeout': 15,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(_extract_info_sync, ydl, url, False),
+                    timeout=25,
+                )
+            extracted = _metadata_from_info(info)
+            if _metadata_is_usable(extracted):
+                return extracted
+            errors.append('экстрактор вернул служебные метаданные площадки')
+        except Exception as error:
+            logger.info('yt-dlp metadata extraction failed for %s: %s', url, error)
+            errors.append(str(error))
 
     try:
         page_metadata = await _fetch_page_metadata(url)

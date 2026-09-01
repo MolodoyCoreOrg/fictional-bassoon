@@ -45,6 +45,40 @@ class MediaFeedbackTests(unittest.IsolatedAsyncioTestCase):
         message.answer_animation.assert_not_awaited()
         message.answer.assert_awaited_once_with("Загрузка", parse_mode="HTML")
 
+    async def test_animation_progress_is_edited_via_caption(self):
+        status = SimpleNamespace(
+            caption="⏳ Загружаю...",
+            animation=object(),
+            edit_caption=AsyncMock(),
+            edit_text=AsyncMock(),
+        )
+
+        await media_feedback.edit_media_status(status, "Готово")
+
+        status.edit_caption.assert_awaited_once_with(
+            caption="Готово",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+        status.edit_text.assert_not_awaited()
+
+    async def test_text_progress_is_edited_via_text(self):
+        status = SimpleNamespace(
+            caption=None,
+            animation=None,
+            edit_caption=AsyncMock(),
+            edit_text=AsyncMock(),
+        )
+
+        await media_feedback.edit_media_status(status, "Готово")
+
+        status.edit_text.assert_awaited_once_with(
+            "Готово",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+        status.edit_caption.assert_not_awaited()
+
     async def test_error_replaces_status_with_matching_image(self):
         sent = SimpleNamespace(message_id=3)
         status = SimpleNamespace(delete=AsyncMock())
