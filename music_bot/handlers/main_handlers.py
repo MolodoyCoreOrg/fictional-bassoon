@@ -128,11 +128,20 @@ async def _send_soundcloud_collection(
 
     prepared = []
     failures = []
+    unavailable = int(collection.get("unavailable") or 0)
+    if unavailable:
+        failures.append({
+            "index": "—",
+            "title": f"Недоступные треки: {unavailable}",
+            "error": "SoundCloud не вернул метаданные или доступ к файлу",
+        })
+
     for index, track in enumerate(tracks, start=1):
+        display_index = track.get("track_number") or index
         track_title = track.get("title") or "Неизвестно"
         await status_msg.edit_text(
             f"💿 <b>{html.escape(collection_title)}</b>\n"
-            f"⏳ Загружаю {index}/{len(tracks)}: {html.escape(track_title)}",
+            f"⏳ Загружаю {display_index}/{total}: {html.escape(track_title)}",
             parse_mode="HTML",
         )
 
@@ -142,7 +151,7 @@ async def _send_soundcloud_collection(
             result = await download_from_url(track.get("url"), track_temp_dir)
             if not result.get("success"):
                 failures.append({
-                    "index": index,
+                    "index": display_index,
                     "title": track_title,
                     "error": result.get("error") or "неизвестная ошибка",
                 })
@@ -178,7 +187,7 @@ async def _send_soundcloud_collection(
                 duration = None
 
             prepared.append({
-                "index": index,
+                "index": display_index,
                 "title": title,
                 "performer": performer,
                 "audio_path": audio_path,
@@ -193,7 +202,7 @@ async def _send_soundcloud_collection(
                 error,
             )
             failures.append({
-                "index": index,
+                "index": display_index,
                 "title": track_title,
                 "error": str(error),
             })
@@ -255,7 +264,7 @@ async def _send_soundcloud_collection(
 
     await status_msg.edit_text(
         f"✅ Сборник <b>{html.escape(collection_title)}</b> загружен: "
-        f"{len(prepared)}/{len(tracks)} трек(ов).",
+        f"{len(prepared)}/{total} трек(ов).",
         parse_mode="HTML",
     )
 
