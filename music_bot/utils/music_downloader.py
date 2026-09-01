@@ -1807,8 +1807,19 @@ async def search_music(query: str, limit: int = 10) -> list:
         return []
 
     per_source_limit = max(3, min(limit, 10))
+    try:
+        search_timeout = float(os.getenv('AUDIO_SEARCH_TIMEOUT_SECONDS', '8'))
+    except ValueError:
+        search_timeout = 8
+    search_timeout = max(2, min(search_timeout, 20))
     batches = await asyncio.gather(
-        *(_search_source(prefix, query, per_source_limit) for prefix in SEARCH_SOURCES),
+        *(
+            asyncio.wait_for(
+                _search_source(prefix, query, per_source_limit),
+                timeout=search_timeout,
+            )
+            for prefix in SEARCH_SOURCES
+        ),
         return_exceptions=True,
     )
 
