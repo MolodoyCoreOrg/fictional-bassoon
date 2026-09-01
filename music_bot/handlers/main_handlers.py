@@ -75,7 +75,7 @@ async def _send_video_to_chat(message: Message, result: dict, caption: str) -> N
 
 # Регулярное выражение для мгновенного перехвата ссылок из любых соцсетей (работает без кнопок и меню)
 VIDEO_REGEX = r'(https?://)?(www\.|m\.)?(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vk\.com/video|vk\.ru/video|rutube\.ru|pinterest\.com|pin\.it|x\.com|twitter\.com|facebook\.com|fb\.watch)[^\s]*'
-AUDIO_REGEX = r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music)|vk\.ru/(audio|music)|music\.yandex\.(ru|com)|music\.youtube\.com|open\.spotify\.com|music\.apple\.com|deezer\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com)[^\s]*'
+AUDIO_REGEX = r'(https?://)?(www\.|m\.)?(soundcloud\.com|on\.soundcloud\.com|vk\.com/(audio|music)|vk\.ru/(audio|music)|music\.yandex\.(ru|com)|music\.youtube\.com|open\.spotify\.com|music\.apple\.com|deezer\.com|deezer\.page\.link|tidal\.com|listen\.tidal\.com|qobuz\.com|play\.qobuz\.com|music\.amazon\.[a-z.]+|pandora\.com|napster\.com|last\.fm|audius\.co|jamendo\.com|boomplay\.com|anghami\.com|promodj\.com|mixcloud\.com|bandcamp\.com|audiomack\.com)[^\s]*'
 
 def extract_url(text: str) -> str:
     """Извлекает первую ссылку из текста сообщения"""
