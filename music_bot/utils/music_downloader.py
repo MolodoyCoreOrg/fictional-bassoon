@@ -30,10 +30,20 @@ def _configured_search_sources() -> tuple[str, ...]:
         'AUDIO_SEARCH_SOURCES',
         'scsearch,yandexsearch,vksearch,deezersearch,itunessearch,ytsearch',
     )
-    sources = tuple(
+    requested = {
         source.strip().lower()
         for source in configured.split(',')
         if source.strip().lower() in SUPPORTED_SEARCH_SOURCES
+    }
+    public_catalogs_enabled = os.getenv(
+        'AUDIO_ENABLE_PUBLIC_CATALOGS',
+        'true',
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    if public_catalogs_enabled:
+        requested.update({'yandexsearch', 'deezersearch', 'itunessearch'})
+
+    sources = tuple(
+        source for source in SUPPORTED_SEARCH_SOURCES if source in requested
     )
     return sources or SUPPORTED_SEARCH_SOURCES
 
