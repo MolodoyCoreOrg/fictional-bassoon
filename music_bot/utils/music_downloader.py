@@ -1255,6 +1255,7 @@ def _soundcloud_collection_from_info(
         'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
         'tracks': tracks,
         'total': total,
+        'unavailable': max(0, total - len(tracks)),
         'truncated': total > limit or len(raw_entries) > limit,
         'limit': limit,
     }
