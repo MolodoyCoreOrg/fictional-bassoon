@@ -1,5 +1,7 @@
 import os
+import re
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -101,6 +103,48 @@ class MediaFeedbackTests(unittest.IsolatedAsyncioTestCase):
         photo = message.answer_photo.await_args.kwargs["photo"]
         self.assertTrue(str(photo.path).endswith("Ошибка загрузки аудио.png"))
         message.answer.assert_not_awaited()
+
+    async def test_long_error_still_sends_matching_image(self):
+        sent_photo = SimpleNamespace(message_id=4)
+        sent_text = SimpleNamespace(message_id=5)
+        message = SimpleNamespace(
+            answer_photo=AsyncMock(return_value=sent_photo),
+            answer=AsyncMock(return_value=sent_text),
+        )
+        long_error = "❌ " + ("Ошибка загрузки. " * 100)
+
+        with patch("utils.media_feedback.Path.is_file", return_value=True):
+            result = await media_feedback.send_media_error(
+                message,
+                None,
+                "video",
+                long_error,
+            )
+
+        self.assertIs(result, sent_text)
+        message.answer_photo.assert_awaited_once()
+        photo_kwargs = message.answer_photo.await_args.kwargs
+        self.assertTrue(str(photo_kwargs["photo"].path).endswith("Ошибка загрузки видео.png"))
+        self.assertEqual(photo_kwargs["caption"], "❌ Ошибка загрузки видео")
+        message.answer.assert_awaited_once_with(
+            long_error,
+            reply_markup=None,
+            parse_mode="HTML",
+        )
+
+    def test_user_visible_handler_errors_use_media_error_helper(self):
+        handlers_path = (
+            Path(__file__).resolve().parents[1]
+            / "handlers"
+            / "main_handlers.py"
+        )
+        source = handlers_path.read_text(encoding="utf-8")
+        direct_error_response = re.compile(
+            r"await\s+(?:message|status_msg|callback)\."
+            r"(?:answer|edit_text)\(\s*f?[\"'](?:❌|⚠️)"
+        )
+
+        self.assertIsNone(direct_error_response.search(source))
 
 
 class VideoQualityKeyboardTests(unittest.TestCase):
