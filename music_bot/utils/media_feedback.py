@@ -13,6 +13,12 @@ ERROR_IMAGE_PATHS = {
     "audio": MEDIA_ASSETS_DIR / "Ошибка загрузки аудио.png",
     "circle": MEDIA_ASSETS_DIR / "Ошибка загрузки кружочка.png",
 }
+ERROR_IMAGE_CAPTIONS = {
+    "video": "❌ Ошибка загрузки видео",
+    "audio": "❌ Ошибка загрузки аудио",
+    "circle": "❌ Ошибка загрузки кружочка",
+}
+TELEGRAM_PHOTO_CAPTION_LIMIT = 1024
 
 
 async def send_media_progress(message: Message, text: str) -> Message:
@@ -74,9 +80,21 @@ async def send_media_error(
     image_path = ERROR_IMAGE_PATHS.get(media_kind)
     if image_path and image_path.is_file():
         try:
-            return await message.answer_photo(
+            if len(text) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+                return await message.answer_photo(
+                    photo=FSInputFile(image_path),
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                )
+
+            await message.answer_photo(
                 photo=FSInputFile(image_path),
-                caption=text,
+                caption=ERROR_IMAGE_CAPTIONS.get(media_kind, "❌ Ошибка загрузки"),
+                parse_mode="HTML",
+            )
+            return await message.answer(
+                text,
                 reply_markup=reply_markup,
                 parse_mode="HTML",
             )
