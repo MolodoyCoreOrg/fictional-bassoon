@@ -198,6 +198,7 @@ inline-список показывает карточки с кнопкой «С
 
 ```env
 AUDIO_SEARCH_SOURCES="scsearch,yandexsearch,vksearch,deezersearch,itunessearch,ytsearch"
+AUDIO_ENABLE_PUBLIC_CATALOGS="true"
 ITUNES_COUNTRY="RU"
 AUDIO_SEARCH_TIMEOUT_SECONDS="8"
 AUDIO_FALLBACK_CANDIDATES="3"
