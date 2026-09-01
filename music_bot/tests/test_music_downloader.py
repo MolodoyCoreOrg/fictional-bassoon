@@ -19,6 +19,68 @@ class CatalogueMetadataTests(unittest.TestCase):
         self.assertEqual(title, "Track Name")
         self.assertEqual(artist, "Artist Name")
 
+    def test_russian_apple_title_and_artist_are_parsed(self):
+        title, artist = music_downloader._split_catalog_title(
+            "Песня «Плачут Небеса (feat. Доминик Джокер)» "
+            "(OG Buda & Егор Крид) в Apple Music",
+            None,
+            "music.apple.com",
+        )
+
+        self.assertEqual(title, "Плачут Небеса (feat. Доминик Джокер)")
+        self.assertEqual(artist, "OG Buda & Егор Крид")
+
+    def test_apple_track_id_handles_song_and_album_track_links(self):
+        self.assertEqual(
+            music_downloader._apple_track_id(
+                "https://music.apple.com/ru/song/track/1724932498"
+            ),
+            "1724932498",
+        )
+        self.assertEqual(
+            music_downloader._apple_track_id(
+                "https://music.apple.com/ru/album/album/1724932497?i=1724932498"
+            ),
+            "1724932498",
+        )
+        self.assertIsNone(
+            music_downloader._apple_track_id(
+                "https://music.apple.com/ru/album/album/1724932497"
+            )
+        )
+
+    def test_itunes_lookup_chooses_the_requested_track(self):
+        metadata = music_downloader._metadata_from_itunes_payload(
+            {
+                "results": [
+                    {
+                        "trackId": 1,
+                        "trackName": "Wrong",
+                        "artistName": "Wrong Artist",
+                    },
+                    {
+                        "trackId": 1724932498,
+                        "trackName": "Плачут Небеса (feat. Доминик Джокер)",
+                        "artistName": "OG BUDA & Egor Kreed",
+                        "collectionId": 1724932497,
+                        "collectionName": "Плачут Небеса - Single",
+                        "artworkUrl100": "https://example.com/100x100bb.jpg",
+                    },
+                ]
+            },
+            "1724932498",
+        )
+
+        self.assertEqual(
+            metadata["title"],
+            "Плачут Небеса (feat. Доминик Джокер)",
+        )
+        self.assertEqual(metadata["artist"], "OG BUDA & Egor Kreed")
+        self.assertEqual(
+            metadata["album_url"],
+            "https://itunes.apple.com/lookup?id=1724932497&entity=song&limit=200",
+        )
+
     def test_vk_artist_and_title_are_parsed(self):
         title, artist = music_downloader._split_catalog_title(
             "Artist Name — Track Name",
@@ -85,6 +147,32 @@ class CatalogueMetadataTests(unittest.TestCase):
             "https://music.yandex.ru/album/41769045",
         )
 
+    def test_yandex_album_payload_finds_the_requested_nested_track(self):
+        metadata = music_downloader._metadata_from_yandex_payload(
+            {
+                "volumes": [[
+                    {
+                        "id": 1,
+                        "title": "Другой трек",
+                        "durationMs": 1000,
+                        "artists": [{"name": "Другой артист"}],
+                        "albums": [{"id": 4847824, "title": "Album"}],
+                    },
+                    {
+                        "id": 38072589,
+                        "title": "Нужный трек",
+                        "durationMs": 2000,
+                        "artists": [{"name": "Нужный артист"}],
+                        "albums": [{"id": 4847824, "title": "Album"}],
+                    },
+                ]]
+            },
+            "38072589",
+        )
+
+        self.assertEqual(metadata["title"], "Нужный трек")
+        self.assertEqual(metadata["artist"], "Нужный артист")
+
     def test_vk_audio_reference_keeps_access_hash(self):
         self.assertEqual(
             music_downloader._vk_audio_reference(
@@ -103,6 +191,69 @@ class CatalogueMetadataTests(unittest.TestCase):
             music_downloader._is_catalog_reference(
                 "https://vk.ru/audio309568744_456240004_5f5df67fe30ddda104"
             )
+        )
+
+
+class YandexMetadataFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ajax_track_entries_is_used_after_api_451(self):
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload=None, error=None):
+                self.payload = payload
+                self.error = error
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            def raise_for_status(self):
+                if self.error:
+                    raise self.error
+
+            async def json(self, content_type=None):
+                return self.payload
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                self.responses = [
+                    FakeResponse(error=RuntimeError("451")),
+                    FakeResponse(payload=[{
+                        "id": 38072589,
+                        "title": "Нужный трек",
+                        "durationMs": 2000,
+                        "artists": [{"name": "Нужный артист"}],
+                        "albums": [{"id": 4847824, "title": "Album"}],
+                    }]),
+                ]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            def get(self, endpoint, **kwargs):
+                calls.append((endpoint, kwargs))
+                return self.responses.pop(0)
+
+        with patch.object(
+            music_downloader.aiohttp,
+            "ClientSession",
+            FakeSession,
+        ):
+            metadata = await music_downloader._fetch_yandex_track_metadata(
+                "https://music.yandex.ru/album/4847824/track/38072589"
+            )
+
+        self.assertEqual(metadata["title"], "Нужный трек")
+        self.assertIn("/handlers/track-entries.jsx", calls[1][0])
+        self.assertEqual(calls[1][1]["params"]["entries"], "38072589")
+        self.assertEqual(
+            calls[1][1]["headers"]["X-Requested-With"],
+            "XMLHttpRequest",
         )
 
 
