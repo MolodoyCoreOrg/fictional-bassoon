@@ -297,10 +297,10 @@ def get_anti_block_opts(use_cookies: bool = True):
 
     pot_provider_url = os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip().rstrip('/')
     youtube_args = {}
+    # Keep this as an explicit operator override only. yt-dlp's supported
+    # YouTube clients change frequently; forcing mweb here disabled newer
+    # working defaults (currently visionos,web) for every request.
     player_clients = _split_env_list('YOUTUBE_PLAYER_CLIENT')
-    if not player_clients and pot_provider_url:
-        # The current yt-dlp recommendation for provider-issued GVS tokens.
-        player_clients = ['mweb']
     if player_clients:
         youtube_args['player_client'] = player_clients
 

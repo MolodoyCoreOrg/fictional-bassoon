@@ -155,7 +155,7 @@ docker run --name bgutil-provider -d --init -p 4416:4416 \
 
 ```env
 YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
-YOUTUBE_PLAYER_CLIENT="mweb"
+YOUTUBE_PLAYER_CLIENT=""
 YTDLP_JS_RUNTIME="deno"
 ```
 
@@ -164,11 +164,13 @@ YTDLP_JS_RUNTIME="deno"
 бота и PO-token provider в общей сети. При запуске через systemd установите
 Deno >= 2.3; альтернативный Node.js должен быть версии 22 или новее.
 
-При заданном `YOUTUBE_POT_PROVIDER_URL` бот автоматически выбирает клиент
-`mweb`. Если обычная загрузка видео возвращает 403, бот заново получает свежие
-ссылки и пробует HLS-профиль `web_safari`, затем cookie-free профиль
-`android_vr`. Для сайтов с Cloudflare устанавливается `curl_cffi` и по
-умолчанию применяется `YTDLP_IMPERSONATE=chrome`.
+Не задавайте `YOUTUBE_PLAYER_CLIENT` без диагностики: актуальный `yt-dlp`
+сам выбирает поддерживаемые клиенты, а принудительный `mweb` отключает новые
+рабочие резервы. Бот сначала использует штатный набор `yt-dlp`, затем отдельно
+пробует provider-backed `mweb`, cookie-free `visionos`, HLS `web_safari`
+и `web_embedded`. Устаревший `android_vr` удалён из цепочки: начиная с
+17.08.2026 YouTube отвечает 403 на все его форматы. Для сайтов с Cloudflare
+по умолчанию применяется `YTDLP_IMPERSONATE=chrome`.
 
 ### Настройка прямой отправки в inline-режиме
 
@@ -321,7 +323,7 @@ TELEGRAM_UPLOAD_TIMEOUT_SECONDS="7200"
 
 ```env
 YTDLP_JS_RUNTIME="deno"
-YOUTUBE_PLAYER_CLIENT="mweb"
+YOUTUBE_PLAYER_CLIENT=""
 YOUTUBE_POT_PROVIDER_URL="http://127.0.0.1:4416"
 ```
 
