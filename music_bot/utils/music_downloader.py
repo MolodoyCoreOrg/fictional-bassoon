@@ -15,11 +15,21 @@ logger = logging.getLogger(__name__)
 
 # Public catalogues often expose metadata but not the original media stream.
 # Prefer SoundCloud so a YouTube anti-bot challenge does not break every link.
-SUPPORTED_SEARCH_SOURCES = ('scsearch', 'vksearch', 'ytsearch')
+SUPPORTED_SEARCH_SOURCES = (
+    'scsearch',
+    'yandexsearch',
+    'vksearch',
+    'deezersearch',
+    'itunessearch',
+    'ytsearch',
+)
 
 
 def _configured_search_sources() -> tuple[str, ...]:
-    configured = os.getenv('AUDIO_SEARCH_SOURCES', 'scsearch,vksearch,ytsearch')
+    configured = os.getenv(
+        'AUDIO_SEARCH_SOURCES',
+        'scsearch,yandexsearch,vksearch,deezersearch,itunessearch,ytsearch',
+    )
     sources = tuple(
         source.strip().lower()
         for source in configured.split(',')
@@ -1341,6 +1351,80 @@ async def _get_deezer_album_tracks(
     return tracks
 
 
+async def _get_yandex_album_tracks(
+    album_url: str,
+    fallback_artist: str,
+    limit: int,
+) -> list:
+    album_match = re.search(r'/album/(\d+)', urlparse(album_url).path)
+    if not album_match:
+        return []
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            f'https://api.music.yandex.net/albums/{album_match.group(1)}/with-tracks'
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    result = payload.get('result') or {}
+    raw_volumes = result.get('volumes') or []
+    items = [
+        item
+        for volume in raw_volumes
+        for item in (volume if isinstance(volume, list) else [])
+        if isinstance(item, dict)
+    ]
+    tracks = []
+    for index, item in enumerate(items[:limit], start=1):
+        track = _yandex_search_entry(item)
+        if not track:
+            continue
+        track['artist'] = track.get('artist') or fallback_artist
+        track['track_number'] = track.get('track_number') or index
+        tracks.append({
+            'title': track['title'],
+            'artist': track['artist'],
+            'url': track['webpage_url'],
+            'duration': track.get('duration'),
+            'thumbnail': track.get('thumbnail'),
+            'track_number': track.get('track_number'),
+        })
+    return tracks
+
+
+async def _get_itunes_album_tracks(
+    album_url: str,
+    fallback_artist: str,
+    limit: int,
+) -> list:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(album_url) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    tracks = []
+    for item in payload.get('results') or []:
+        if len(tracks) >= limit:
+            break
+        if item.get('wrapperType') != 'track' or item.get('kind') != 'song':
+            continue
+        track = _itunes_search_entry(item)
+        if not track:
+            continue
+        tracks.append({
+            'title': track['title'],
+            'artist': track.get('artist') or fallback_artist,
+            'url': track['webpage_url'],
+            'duration': track.get('duration'),
+            'thumbnail': track.get('thumbnail'),
+            'track_number': track.get('track_number') or len(tracks) + 1,
+        })
+    return tracks
+
+
 def _normalize_album_track(entry: dict, fallback_artist: str = "Неизвестно") -> dict | None:
     """Converts a yt-dlp playlist/search entry into the bot track schema."""
     if not entry:
@@ -1379,8 +1463,21 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
         return []
 
     try:
-        if _url_host(album_url) == "api.deezer.com":
+        host = _url_host(album_url)
+        if host == "api.deezer.com":
             return await _get_deezer_album_tracks(
+                album_url,
+                fallback_artist=fallback_artist,
+                limit=limit,
+            )
+        if host.startswith("music.yandex."):
+            return await _get_yandex_album_tracks(
+                album_url,
+                fallback_artist=fallback_artist,
+                limit=limit,
+            )
+        if host == "itunes.apple.com":
+            return await _get_itunes_album_tracks(
                 album_url,
                 fallback_artist=fallback_artist,
                 limit=limit,
@@ -1412,6 +1509,197 @@ async def get_album_tracks(album_url: str, fallback_artist: str = "Неизве�
     except Exception as e:
         logger.warning(f"Album tracks loading error for {album_url}: {e}")
         return []
+
+
+def _yandex_search_entry(item: dict) -> dict | None:
+    track_id = item.get('id')
+    title = _clean_metadata_value(item.get('title'))
+    artists = ', '.join(
+        name
+        for name in (
+            _clean_metadata_value(artist.get('name'))
+            for artist in (item.get('artists') or [])
+            if isinstance(artist, dict)
+        )
+        if name
+    ) or 'Неизвестно'
+    albums = [album for album in (item.get('albums') or []) if isinstance(album, dict)]
+    album = albums[0] if albums else {}
+    album_id = album.get('id')
+    if not title or track_id is None:
+        return None
+
+    if album_id is not None:
+        webpage_url = f'https://music.yandex.ru/album/{album_id}/track/{track_id}'
+        album_url = f'https://music.yandex.ru/album/{album_id}'
+    else:
+        webpage_url = f'https://music.yandex.ru/track/{track_id}'
+        album_url = None
+
+    cover_uri = item.get('coverUri') or album.get('coverUri')
+    thumbnail = None
+    if cover_uri:
+        thumbnail = str(cover_uri).replace('%%', '1000x1000')
+        if thumbnail.startswith('//'):
+            thumbnail = f'https:{thumbnail}'
+        elif not thumbnail.startswith(('http://', 'https://')):
+            thumbnail = f'https://{thumbnail.lstrip("/")}'
+
+    duration_ms = item.get('durationMs')
+    return {
+        'id': str(track_id),
+        'title': title,
+        'artist': artists,
+        'duration': int(duration_ms / 1000) if duration_ms else None,
+        'webpage_url': webpage_url,
+        'thumbnail': thumbnail if _is_http_url(thumbnail) else None,
+        'album': _clean_metadata_value(album.get('title')),
+        'album_url': album_url,
+        'track_number': item.get('trackPosition', {}).get('index')
+        if isinstance(item.get('trackPosition'), dict)
+        else None,
+    }
+
+
+async def _search_yandex_source(query: str, limit: int) -> list:
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://api.music.yandex.net/search',
+            params={
+                'text': query,
+                'type': 'track',
+                'page': 0,
+                'nocorrect': 'false',
+            },
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    result = payload.get('result') or {}
+    tracks = result.get('tracks') or {}
+    items = tracks.get('results') or tracks.get('items') or []
+    normalized = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entry = _yandex_search_entry(item)
+        if entry:
+            normalized.append(entry)
+    return normalized
+
+
+def _deezer_search_entry(item: dict) -> dict | None:
+    title = _clean_metadata_value(item.get('title'))
+    artist = _clean_metadata_value((item.get('artist') or {}).get('name'))
+    track_id = item.get('id')
+    if not title or not artist or track_id is None:
+        return None
+
+    album = item.get('album') or {}
+    album_id = album.get('id')
+    return {
+        'id': str(track_id),
+        'title': title,
+        'artist': artist,
+        'duration': item.get('duration'),
+        'webpage_url': (
+            item.get('link')
+            if _is_http_url(item.get('link'))
+            else f'https://www.deezer.com/track/{track_id}'
+        ),
+        'thumbnail': next(
+            (
+                album.get(name)
+                for name in ('cover_xl', 'cover_big', 'cover_medium')
+                if _is_http_url(album.get(name))
+            ),
+            None,
+        ),
+        'album': _clean_metadata_value(album.get('title')),
+        'album_url': (
+            f'https://api.deezer.com/album/{album_id}/tracks'
+            if album_id is not None
+            else None
+        ),
+        'track_number': item.get('track_position'),
+    }
+
+
+async def _search_deezer_source(query: str, limit: int) -> list:
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://api.deezer.com/search',
+            params={'q': query, 'limit': limit},
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    normalized = []
+    for item in (payload.get('data') or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entry = _deezer_search_entry(item)
+        if entry:
+            normalized.append(entry)
+    return normalized
+
+
+def _itunes_search_entry(item: dict) -> dict | None:
+    title = _clean_metadata_value(item.get('trackName'))
+    artist = _clean_metadata_value(item.get('artistName'))
+    track_url = item.get('trackViewUrl')
+    if not title or not artist or not _is_http_url(track_url):
+        return None
+
+    artwork = item.get('artworkUrl100')
+    if _is_http_url(artwork):
+        artwork = re.sub(r'/\d+x\d+bb\.', '/600x600bb.', artwork)
+
+    collection_id = item.get('collectionId')
+    duration_ms = item.get('trackTimeMillis')
+    return {
+        'id': str(item.get('trackId') or track_url),
+        'title': title,
+        'artist': artist,
+        'duration': int(duration_ms / 1000) if duration_ms else None,
+        'webpage_url': track_url,
+        'thumbnail': artwork if _is_http_url(artwork) else None,
+        'album': _clean_metadata_value(item.get('collectionName')),
+        'album_url': (
+            f'https://itunes.apple.com/lookup?id={collection_id}&entity=song&limit=200'
+            if collection_id is not None
+            else None
+        ),
+        'track_number': item.get('trackNumber'),
+    }
+
+
+async def _search_itunes_source(query: str, limit: int) -> list:
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            'https://itunes.apple.com/search',
+            params={
+                'term': query,
+                'entity': 'song',
+                'media': 'music',
+                'limit': limit,
+                'country': os.getenv('ITUNES_COUNTRY', 'RU').strip() or 'RU',
+            },
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+    normalized = []
+    for item in (payload.get('results') or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entry = _itunes_search_entry(item)
+        if entry:
+            normalized.append(entry)
+    return normalized
 
 
 async def _search_vk_source(query: str, limit: int) -> list:
@@ -1484,8 +1772,14 @@ async def _search_vk_source(query: str, limit: int) -> list:
 
 async def _search_source(prefix: str, query: str, limit: int) -> list:
     """Returns lightweight search entries without resolving media streams."""
+    if prefix == 'yandexsearch':
+        return await _search_yandex_source(query, limit)
     if prefix == 'vksearch':
         return await _search_vk_source(query, limit)
+    if prefix == 'deezersearch':
+        return await _search_deezer_source(query, limit)
+    if prefix == 'itunessearch':
+        return await _search_itunes_source(query, limit)
     ydl_opts = {
         **get_anti_block_opts(use_cookies=prefix.startswith('yt')),
         'extract_flat': 'in_playlist',
@@ -1508,7 +1802,7 @@ async def _search_source(prefix: str, query: str, limit: int) -> list:
 
 
 async def search_music(query: str, limit: int = 10) -> list:
-    """Searches SoundCloud, VK and YouTube and interleaves their results."""
+    """Searches public music catalogues and interleaves deduplicated results."""
     if not query.strip() or limit < 1:
         return []
 
@@ -1571,6 +1865,7 @@ async def search_music(query: str, limit: int = 10) -> list:
 
     results = []
     seen_urls = set()
+    seen_tracks = {}
     max_batch_size = max((len(batch) for batch in normalized_batches), default=0)
     for item_index in range(max_batch_size):
         for batch in normalized_batches:
@@ -1580,6 +1875,20 @@ async def search_music(query: str, limit: int = 10) -> list:
             if track['url'] in seen_urls:
                 continue
             seen_urls.add(track['url'])
+
+            metadata_key = (
+                _metadata_key(track.get('title')),
+                _metadata_key(track.get('artist')),
+            )
+            existing_index = seen_tracks.get(metadata_key)
+            if existing_index is not None and all(metadata_key):
+                existing = results[existing_index]
+                for field in ('album', 'album_url', 'thumbnail', 'duration'):
+                    if not existing.get(field) and track.get(field):
+                        existing[field] = track[field]
+                continue
+
+            seen_tracks[metadata_key] = len(results)
             results.append(track)
             if len(results) >= limit:
                 logger.info("Total found %s results for query: %s", len(results), query)
