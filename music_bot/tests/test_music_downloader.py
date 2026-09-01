@@ -47,15 +47,71 @@ class CatalogueMetadataTests(unittest.TestCase):
             )
         )
 
+    def test_service_placeholder_metadata_is_rejected(self):
+        self.assertFalse(
+            music_downloader._metadata_is_usable(
+                {
+                    "title": "Яндекс Музыка",
+                    "artist": "собираем музыку для вас",
+                }
+            )
+        )
+        self.assertFalse(
+            music_downloader._metadata_is_usable(
+                {"title": "VK Музыка", "artist": None}
+            )
+        )
+
+    def test_yandex_track_payload_returns_exact_metadata(self):
+        metadata = music_downloader._metadata_from_yandex_payload(
+            {
+                "result": [{
+                    "title": "Паук",
+                    "artists": [{"name": "oracle"}],
+                    "coverUri": "avatars.yandex.net/get-music-content/123/%%",
+                    "albums": [{"id": 41769045, "title": "Album"}],
+                }]
+            }
+        )
+
+        self.assertEqual(metadata["title"], "Паук")
+        self.assertEqual(metadata["artist"], "oracle")
+        self.assertEqual(
+            metadata["thumbnail"],
+            "https://avatars.yandex.net/get-music-content/123/1000x1000",
+        )
+        self.assertEqual(
+            metadata["album_url"],
+            "https://music.yandex.ru/album/41769045",
+        )
+
+    def test_vk_audio_reference_keeps_access_hash(self):
+        self.assertEqual(
+            music_downloader._vk_audio_reference(
+                "https://vk.ru/audio309568744_456240004_5f5df67fe30ddda104"
+            ),
+            "309568744_456240004_5f5df67fe30ddda104",
+        )
+
+    def test_yandex_and_vk_are_catalog_references(self):
+        self.assertTrue(
+            music_downloader._is_catalog_reference(
+                "https://music.yandex.ru/album/41769045/track/150686486"
+            )
+        )
+        self.assertTrue(
+            music_downloader._is_catalog_reference(
+                "https://vk.ru/audio309568744_456240004_5f5df67fe30ddda104"
+            )
+        )
+
 
 class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_empty_direct_result_tries_multiple_soundcloud_candidates(self):
+    async def test_yandex_uses_exact_metadata_and_tries_multiple_candidates(self):
         calls = []
 
         async def fake_download(target, temp_dir, use_cookies):
             calls.append((target, use_cookies))
-            if target.startswith("https://music.yandex.ru/"):
-                return {}
             if target.endswith("/blocked"):
                 raise RuntimeError("HTTP Error 403: Forbidden")
 
@@ -95,7 +151,7 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(music_downloader, "has_ffmpeg", return_value=True),
                 patch.object(
                     music_downloader,
-                    "_extract_reference_metadata",
+                    "_resolve_catalog_metadata",
                     AsyncMock(return_value=metadata),
                 ),
                 patch.object(music_downloader, "SEARCH_SOURCES", ("scsearch",)),
@@ -115,11 +171,10 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["title"], "Track Name")
         self.assertEqual(result["artist"], "Artist Name")
+        self.assertEqual(calls[0][0], "https://soundcloud.com/artist/blocked")
+        self.assertEqual(calls[1][0], "https://soundcloud.com/artist/working")
         self.assertFalse(calls[0][1])
-        self.assertEqual(calls[1][0], "https://soundcloud.com/artist/blocked")
-        self.assertEqual(calls[2][0], "https://soundcloud.com/artist/working")
         self.assertFalse(calls[1][1])
-        self.assertFalse(calls[2][1])
 
     async def test_vk_direct_url_is_used_by_catalogue_fallback(self):
         calls = []
@@ -149,6 +204,72 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(info["id"], "1_2")
         self.assertEqual(calls, [("https://cs.example/track.mp3", False)])
+
+    async def test_low_confidence_candidate_is_never_downloaded(self):
+        download = AsyncMock()
+        with (
+            patch.object(music_downloader, "SEARCH_SOURCES", ("scsearch",)),
+            patch.object(
+                music_downloader,
+                "_search_source",
+                AsyncMock(return_value=[{
+                    "title": "Completely Different Song",
+                    "artist": "Another Artist",
+                    "webpage_url": "https://soundcloud.com/another/wrong",
+                }]),
+            ),
+            patch.object(music_downloader, "_download_info", download),
+            patch.dict(os.environ, {"AUDIO_FALLBACK_MIN_MATCH": "0.78"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "случайный трек"):
+                await music_downloader._download_catalog_match(
+                    {"title": "Паук", "artist": "oracle"},
+                    "unused",
+                )
+
+        download.assert_not_awaited()
+
+    async def test_vk_exact_api_url_is_preferred_over_search(self):
+        fallback = AsyncMock()
+        metadata = {
+            "title": "Track",
+            "artist": "Artist",
+            "thumbnail": None,
+            "download_url": "https://cs.example/exact.mp3",
+        }
+
+        async def fake_download(target, temp_dir, use_cookies):
+            self.assertEqual(target, "https://cs.example/exact.mp3")
+            audio_path = os.path.join(temp_dir, "exact.mp3")
+            with open(audio_path, "wb") as audio_file:
+                audio_file.write(b"test audio")
+            return {"id": "exact", "title": "Track", "artist": "Artist"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(music_downloader, "has_ffmpeg", return_value=True),
+                patch.object(
+                    music_downloader,
+                    "_resolve_catalog_metadata",
+                    AsyncMock(return_value=metadata),
+                ),
+                patch.object(music_downloader, "_download_info", side_effect=fake_download),
+                patch.object(music_downloader, "_download_catalog_match", fallback),
+                patch.object(
+                    music_downloader,
+                    "_download_thumbnail",
+                    AsyncMock(return_value=None),
+                ),
+            ):
+                result = await music_downloader.download_from_url(
+                    "https://vk.ru/audio1_2_hash",
+                    temp_dir,
+                )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["title"], "Track")
+        self.assertEqual(result["artist"], "Artist")
+        fallback.assert_not_awaited()
 
     async def test_failed_social_download_uses_cross_provider_metadata_fallback(self):
         calls = []
