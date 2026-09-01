@@ -384,7 +384,10 @@ def _metadata_from_yandex_payload(payload, track_id: str | None = None) -> dict 
             ),
             None,
         )
-    track = track or candidates[0]
+        if track is None:
+            return None
+    else:
+        track = candidates[0]
 
     artists = ', '.join(
         name
@@ -581,7 +584,7 @@ def _apple_track_id(url: str) -> str | None:
         return str(query_id)
 
     match = re.search(
-        r'/(?:song|music-video)/[^/]+/(\d+)/?$',
+        r'/(?:song|music-video)/(?:[^/]+/)?(\d+)/?$',
         parsed.path,
         flags=re.IGNORECASE,
     )
@@ -608,8 +611,9 @@ def _metadata_from_itunes_payload(
             ),
             None,
         )
-        if exact:
-            candidates = [exact]
+        if not exact:
+            return None
+        candidates = [exact]
     if not candidates:
         return None
 
