@@ -957,8 +957,11 @@ async def process_upload_video_note(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "⭕ <b>Загрузка видео кружочком</b>\n\n"
         "Отправьте видео прямо в этот чат.\n\n"
-        "⚠️ <b>Важно:</b> видео должно быть <b>квадратным</b> и длиться "
-        "<b>не более 1 минуты</b>. Иначе Telegram не позволит сделать из него кружочек.\n\n"
+        "Можно отправить:\n"
+        "1️⃣ <b>квадратное видео</b> — оно сразу будет подготовлено как кружочек;\n"
+        "2️⃣ <b>видео с любым соотношением сторон</b> — бот автоматически обрежет "
+        "его до квадрата по центру кадра.\n\n"
+        "⏱ <b>Ограничение:</b> длительность видео — <b>не более 1 минуты</b>.\n\n"
         "Отправляйте ролик именно как видео, а не как файл.",
         reply_markup=get_back_keyboard(),
         parse_mode="HTML"
@@ -977,17 +980,6 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
             "circle",
             "❌ Видео длится больше 1 минуты. Telegram поддерживает кружочки "
             "длительностью не более 60 секунд. Пришлите более короткое видео.",
-            reply_markup=get_back_keyboard(),
-        )
-        return
-
-    if video.width != video.height:
-        await send_media_error(
-            message,
-            None,
-            "circle",
-            f"❌ Видео должно быть квадратным. Сейчас размер: {video.width}×{video.height}. "
-            "Обрежьте ролик до формата 1:1 и отправьте его снова.",
             reply_markup=get_back_keyboard(),
         )
         return
@@ -1024,7 +1016,11 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
             "-i", input_path,
             "-map", "0:v:0",
             "-map", "0:a?",
-            "-vf", "scale=480:480,setsar=1",
+            "-vf", (
+                "crop='min(iw,ih)':'min(iw,ih)':"
+                "'(iw-min(iw,ih))/2':'(ih-min(iw,ih))/2',"
+                "scale=480:480,setsar=1"
+            ),
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "24",
@@ -1060,7 +1056,7 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
             status_msg,
             "circle",
             "❌ Не удалось сделать кружочек из этого видео. "
-            "Проверьте, что ролик квадратный, длится не более минуты и попробуйте снова.",
+            "Проверьте, что ролик длится не более минуты, и попробуйте снова.",
         )
     finally:
         await cleanup_temp_files(user_temp_dir)
@@ -1073,7 +1069,8 @@ async def handle_invalid_video_note_upload(message: Message):
         message,
         None,
         "circle",
-        "❌ Отправьте квадратный ролик длительностью не более 1 минуты именно как видео.",
+        "❌ Отправьте ролик длительностью не более 1 минуты именно как видео, а не как файл. "
+        "Соотношение сторон может быть любым.",
         reply_markup=get_back_keyboard(),
     )
 
