@@ -87,6 +87,23 @@ class CatalogueMetadataTests(unittest.TestCase):
             "https://itunes.apple.com/lookup?id=1724932497&entity=song&limit=200",
         )
 
+    def test_localized_apple_match_clears_the_safety_threshold(self):
+        score = music_downloader._candidate_match_score(
+            {
+                "title": "Плачут Небеса (feat. Доминик Джокер)",
+                "artist": "OG Buda & Егор Крид",
+            },
+            {
+                "title": "Плачут Небеса (feat. Доминик Джокер)",
+                "channel": "OG BUDA & Egor Kreed",
+            },
+        )
+
+        self.assertGreaterEqual(
+            score,
+            music_downloader._configured_min_match(),
+        )
+
     def test_provider_payloads_never_fall_back_to_a_different_track_id(self):
         self.assertIsNone(
             music_downloader._metadata_from_yandex_payload(
