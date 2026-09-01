@@ -397,6 +397,26 @@ class DownloadFallbackTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
+    def test_public_catalogues_extend_legacy_source_configuration(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AUDIO_SEARCH_SOURCES": "scsearch,vksearch,ytsearch",
+                "AUDIO_ENABLE_PUBLIC_CATALOGS": "true",
+            },
+        ):
+            self.assertEqual(
+                music_downloader._configured_search_sources(),
+                (
+                    "scsearch",
+                    "yandexsearch",
+                    "vksearch",
+                    "deezersearch",
+                    "itunessearch",
+                    "ytsearch",
+                ),
+            )
+
     def test_youtube_retry_profiles_include_hls_and_cookie_free_client(self):
         profiles = music_downloader._youtube_download_profiles(
             "https://www.youtube.com/watch?v=example"
