@@ -42,6 +42,11 @@ class SoundCloudCollectionMetadataTests(unittest.TestCase):
                 "https://on.soundcloud.com/example"
             )
         )
+        self.assertTrue(
+            music_downloader.is_soundcloud_collection_url(
+                "https://m.soundcloud.com/guchigengovo/sets/tagozacziya-vol-1"
+            )
+        )
         self.assertFalse(
             music_downloader.is_soundcloud_collection_url(
                 "https://soundcloud.com/guchigengovo/single-track"
