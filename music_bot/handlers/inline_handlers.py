@@ -13,6 +13,7 @@ from aiogram.types import (
     InputTextMessageContent,
 )
 
+from utils.album_cache import cache_album
 from utils.config import INLINE_STORAGE_CHAT_ID
 from utils.inline_media import (
     create_inline_media_url,
@@ -20,6 +21,7 @@ from utils.inline_media import (
     get_inline_media_request,
     register_inline_media_request,
 )
+from utils.keyboard import get_inline_album_keyboard, get_inline_result_keyboard
 from utils.music_downloader import search_music
 from utils.track_history import (
     get_cached_audio,
@@ -39,6 +41,29 @@ def _caption(track: dict) -> str:
     )
 
 
+def _album_reference(track: dict) -> tuple[str | None, str | None]:
+    album_title = (track.get("album") or "").strip()
+    album_url = (track.get("album_url") or "").strip()
+    if not album_title or not album_url:
+        return None, None
+
+    album_key = cache_album({
+        "album": album_title,
+        "artist": track.get("artist") or "Неизвестно",
+        "album_url": album_url,
+        "thumbnail": track.get("thumbnail"),
+        "tracks": [],
+    })
+    return album_title, album_key
+
+
+def _album_markup(track: dict):
+    album_title, album_key = _album_reference(track)
+    if not album_key:
+        return None
+    return get_inline_album_keyboard(album_title, album_key)
+
+
 def _cached_result(track: dict, prefix: str = "h") -> InlineQueryResultCachedAudio:
     request_key = register_inline_media_request(track)
     return InlineQueryResultCachedAudio(
@@ -46,10 +71,18 @@ def _cached_result(track: dict, prefix: str = "h") -> InlineQueryResultCachedAud
         audio_file_id=track["file_id"],
         caption=_caption(track),
         parse_mode="HTML",
+        reply_markup=_album_markup(track),
     )
 
 
-def _article(result_id: str, title: str, description: str, text: str) -> InlineQueryResultArticle:
+def _article(
+    result_id: str,
+    title: str,
+    description: str,
+    text: str,
+    thumbnail_url: str | None = None,
+    reply_markup=None,
+) -> InlineQueryResultArticle:
     return InlineQueryResultArticle(
         id=result_id,
         title=title,
@@ -58,7 +91,47 @@ def _article(result_id: str, title: str, description: str, text: str) -> InlineQ
             message_text=text,
             parse_mode="HTML",
         ),
-        thumbnail_url="https://cdn-icons-png.flaticon.com/512/1384/1384060.png",
+        thumbnail_url=(
+            thumbnail_url
+            or "https://cdn-icons-png.flaticon.com/512/1384/1384060.png"
+        ),
+        reply_markup=reply_markup,
+    )
+
+
+def _download_article(track: dict) -> InlineQueryResultArticle:
+    """Keeps search useful when the public MP3 gateway is not configured."""
+    track_key = cache_album({
+        "album": track.get("album") or "Результат поиска",
+        "artist": track.get("artist") or "Неизвестно",
+        "album_url": track.get("album_url"),
+        "thumbnail": track.get("thumbnail"),
+        "tracks": [dict(track)],
+    })
+    album_title, album_key = _album_reference(track)
+    title = track.get("title") or "Неизвестно"
+    artist = track.get("artist") or "Неизвестно"
+    duration = track.get("duration")
+    duration_text = ""
+    if duration:
+        minutes, seconds = divmod(int(duration), 60)
+        duration_text = f"{minutes}:{seconds:02d} · "
+
+    return _article(
+        f"d_{track_key}",
+        title,
+        f"{duration_text}{artist}",
+        (
+            f"🎵 <b>{html.escape(title)}</b>\n"
+            f"👤 {html.escape(artist)}\n\n"
+            "Нажмите кнопку ниже, чтобы скачать трек в личном чате с ботом."
+        ),
+        thumbnail_url=track.get("thumbnail"),
+        reply_markup=get_inline_result_keyboard(
+            track_key,
+            album_title=album_title,
+            album_key=album_key,
+        ),
     )
 
 
@@ -133,6 +206,8 @@ async def inline_search(inline_query: InlineQuery):
 
             request_key, audio_url = create_inline_media_url(track)
             if not request_key or not audio_url:
+                results.append(_download_article(track))
+                seen_source_urls.add(track["url"])
                 continue
 
             duration = track.get("duration")
@@ -145,6 +220,7 @@ async def inline_search(inline_query: InlineQuery):
                     audio_duration=int(duration) if duration else None,
                     caption=_caption(track),
                     parse_mode="HTML",
+                    reply_markup=_album_markup(track),
                 )
             )
             seen_source_urls.add(track["url"])
