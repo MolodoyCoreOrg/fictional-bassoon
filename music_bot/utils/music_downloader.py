@@ -1271,7 +1271,10 @@ async def get_soundcloud_collection(
     collection_limit = limit or _configured_collection_limit()
     ydl_opts = {
         **get_anti_block_opts(),
-        'extract_flat': 'in_playlist',
+        # SoundCloudSetIE flat entries can contain only an API URL and track ID.
+        # Resolve track metadata, but never download media during this first pass.
+        'extract_flat': False,
+        'skip_download': True,
         'playlistend': collection_limit + 1,
         'noplaylist': False,
         'socket_timeout': 20,
@@ -1283,7 +1286,7 @@ async def get_soundcloud_collection(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.wait_for(
                 asyncio.to_thread(_extract_info_sync, ydl, url, False),
-                timeout=45,
+                timeout=max(45, min(collection_limit * 3, 300)),
             )
     except Exception as error:
         logger.warning('SoundCloud collection loading error for %s: %s', url, error)
