@@ -5,46 +5,85 @@ from unittest.mock import patch
 
 os.environ.setdefault("BOT_TOKEN", "test-token")
 
-from utils import video_downloader
+from utils import config, video_downloader
 
 
 class YouTubeVideoProfileTests(unittest.TestCase):
-    def test_youtube_profiles_include_hls_and_cookie_free_fallbacks(self):
-        profiles = video_downloader._youtube_video_download_profiles(
-            "https://www.youtube.com/watch?v=example"
-        )
+    def _profiles(self, provider_url=""):
+        with patch.dict(
+            os.environ,
+            {"YOUTUBE_POT_PROVIDER_URL": provider_url},
+        ):
+            return video_downloader._youtube_video_download_profiles(
+                "https://www.youtube.com/watch?v=example"
+            )
+
+    def test_youtube_profiles_follow_current_supported_clients(self):
+        profiles = self._profiles()
 
         self.assertEqual([profile["_label"] for profile in profiles], [
             "default",
+            "visionos-cookie-free",
             "web_safari-hls",
-            "android_vr-cookie-free",
+            "web_embedded-cookie-free",
         ])
-        self.assertTrue(profiles[1]["_prefer_hls"])
+        self.assertFalse(profiles[1]["_use_cookies"])
         self.assertEqual(
             profiles[1]["extractor_args"]["youtube"]["player_client"],
-            ["web_safari"],
+            ["visionos"],
         )
-        self.assertFalse(profiles[2]["_use_cookies"])
+        self.assertTrue(profiles[2]["_prefer_hls"])
         self.assertEqual(
             profiles[2]["extractor_args"]["youtube"]["player_client"],
-            ["android_vr"],
+            ["web_safari"],
+        )
+        self.assertNotIn("android_vr-cookie-free", {
+            profile["_label"] for profile in profiles
+        })
+
+    def test_provider_adds_isolated_mweb_retry_with_forced_token_fetch(self):
+        profiles = self._profiles("http://bgutil-provider:4416")
+        mweb = next(
+            profile for profile in profiles
+            if profile["_label"] == "mweb-po-token"
         )
 
-    def test_hls_profile_keeps_provider_token_configuration(self):
+        self.assertEqual(
+            mweb["extractor_args"]["youtube"]["player_client"],
+            ["mweb"],
+        )
+        self.assertEqual(
+            mweb["extractor_args"]["youtube"]["fetch_pot"],
+            ["always"],
+        )
+
+    def test_provider_configuration_does_not_pin_every_request_to_mweb(self):
+        with patch.dict(os.environ, {
+            "YOUTUBE_POT_PROVIDER_URL": "http://bgutil-provider:4416",
+            "YOUTUBE_PLAYER_CLIENT": "",
+            "YOUTUBE_PO_TOKEN": "",
+            "YOUTUBE_VISITOR_DATA": "",
+        }):
+            opts = config.get_anti_block_opts()
+
+        self.assertNotIn("youtube", opts["extractor_args"])
+        self.assertEqual(
+            opts["extractor_args"]["youtubepot-bgutilhttp"]["base_url"],
+            ["http://bgutil-provider:4416"],
+        )
+
+    def test_hls_profile_keeps_provider_configuration(self):
         anti_block_opts = {
             "extractor_args": {
-                "youtube": {
-                    "player_client": ["mweb"],
-                    "po_token": ["mweb.gvs+token"],
-                },
                 "youtubepot-bgutilhttp": {
                     "base_url": ["http://bgutil-provider:4416"],
                 },
             },
         }
-        profile = video_downloader._youtube_video_download_profiles(
-            "https://youtu.be/example"
-        )[1]
+        profile = next(
+            item for item in self._profiles("http://bgutil-provider:4416")
+            if item["_label"] == "web_safari-hls"
+        )
 
         with (
             patch.object(
@@ -67,14 +106,9 @@ class YouTubeVideoProfileTests(unittest.TestCase):
             ["web_safari"],
         )
         self.assertEqual(
-            opts["extractor_args"]["youtube"]["po_token"],
-            ["mweb.gvs+token"],
-        )
-        self.assertEqual(
             opts["extractor_args"]["youtubepot-bgutilhttp"]["base_url"],
             ["http://bgutil-provider:4416"],
         )
-
 
 
 
@@ -503,7 +537,7 @@ class PinterestFallbackTests(unittest.TestCase):
 
 
 class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_download_reaches_cookie_free_profile_after_403(self):
+    async def test_download_reaches_hls_after_default_and_visionos_fail(self):
         calls = []
         cookie_calls = []
 
@@ -534,6 +568,10 @@ class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
+                patch.dict(
+                    os.environ,
+                    {"YOUTUBE_POT_PROVIDER_URL": ""},
+                ),
                 patch.object(
                     video_downloader,
                     "get_anti_block_opts",
@@ -554,16 +592,16 @@ class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(len(calls), 3)
-        self.assertEqual(cookie_calls, [True, True, False])
+        self.assertEqual(cookie_calls, [True, False, True])
         self.assertEqual(
             calls[1]["extractor_args"]["youtube"]["player_client"],
-            ["web_safari"],
+            ["visionos"],
         )
-        self.assertIn("protocol^=m3u8", calls[1]["format"])
         self.assertEqual(
             calls[2]["extractor_args"]["youtube"]["player_client"],
-            ["android_vr"],
+            ["web_safari"],
         )
+        self.assertIn("protocol^=m3u8", calls[2]["format"])
 
     async def test_all_403_profiles_return_actionable_error(self):
         error = RuntimeError(
@@ -571,6 +609,10 @@ class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
+                patch.dict(
+                    os.environ,
+                    {"YOUTUBE_POT_PROVIDER_URL": ""},
+                ),
                 patch.object(video_downloader, "get_anti_block_opts", return_value={}),
                 patch.object(video_downloader, "has_ffmpeg", return_value=False),
                 patch.object(
@@ -586,7 +628,7 @@ class YouTubeVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertFalse(result["success"])
-        self.assertEqual(extract.call_count, 3)
+        self.assertEqual(extract.call_count, 4)
         self.assertIn("PO-token provider", result["error"])
         self.assertIn("YOUTUBE_POT_PROVIDER_URL", result["error"])
 

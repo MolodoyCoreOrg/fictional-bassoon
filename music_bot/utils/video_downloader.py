@@ -731,12 +731,34 @@ def _merge_extractor_args(base: Dict | None, extra: Dict | None) -> Dict:
 
 
 def _youtube_video_download_profiles(url: str) -> list[Dict]:
-    """Returns progressively more compatible YouTube playback profiles."""
+    """Returns current, isolated YouTube playback profiles for a fresh retry."""
     profiles = [{'_label': 'default'}]
     if not _is_youtube_url(url):
         return profiles
 
+    # Do not globally pin a player client. Current yt-dlp releases deliberately
+    # rotate their defaults as YouTube changes enforcement. A provider-backed
+    # mweb request is still valuable, but only as an isolated retry.
+    if os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip():
+        profiles.append({
+            '_label': 'mweb-po-token',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['mweb'],
+                    # Ask the provider even during partial/rolling enforcement.
+                    'fetch_pot': ['always'],
+                },
+            },
+        })
+
     profiles.extend([
+        {
+            '_label': 'visionos-cookie-free',
+            '_use_cookies': False,
+            'extractor_args': {
+                'youtube': {'player_client': ['visionos']},
+            },
+        },
         {
             '_label': 'web_safari-hls',
             '_prefer_hls': True,
@@ -745,10 +767,10 @@ def _youtube_video_download_profiles(url: str) -> list[Dict]:
             },
         },
         {
-            '_label': 'android_vr-cookie-free',
+            '_label': 'web_embedded-cookie-free',
             '_use_cookies': False,
             'extractor_args': {
-                'youtube': {'player_client': ['android_vr']},
+                'youtube': {'player_client': ['web_embedded']},
             },
         },
     ])
@@ -846,12 +868,18 @@ def _human_error(error: Exception, url: str | None = None) -> str:
         or "unable to download video data" in lower
     )
     if is_forbidden and _is_youtube_url(url or ""):
+        if os.getenv('YOUTUBE_POT_PROVIDER_URL', '').strip():
+            return (
+                "YouTube отклонил все актуальные профили загрузки (HTTP 403), "
+                "включая PO-token и HLS. Проверьте /ping и логи настроенного "
+                "PO-token provider, пересоберите образ с актуальным yt-dlp и при "
+                "необходимости обновите Netscape cookies.txt через COOKIES_FILE."
+            )
         return (
-            "YouTube отклонил все доступные ссылки на видео (HTTP 403). Бот уже "
-            "попробовал обычный, HLS и cookie-free профили. На сервере запустите "
-            "динамический PO-token provider и задайте "
-            "YOUTUBE_POT_PROVIDER_URL=http://127.0.0.1:4416; при необходимости "
-            "добавьте свежий Netscape cookies.txt через COOKIES_FILE."
+            "YouTube отклонил все актуальные профили загрузки (HTTP 403). "
+            "Запустите проект через docker compose с PO-token provider либо "
+            "задайте YOUTUBE_POT_PROVIDER_URL; при необходимости добавьте свежий "
+            "Netscape cookies.txt через COOKIES_FILE."
         )
     if "sign in to confirm" in lower or "not a bot" in lower:
         if COOKIES_FILE or os.getenv("COOKIES_FROM_BROWSER"):

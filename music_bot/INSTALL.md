@@ -35,7 +35,7 @@ pip install -r requirements.txt
 - `aiogram==3.21.0` - фреймворк для Telegram ботов
 - `mutagen>=1.47.0` - работа с метаданными аудио
 - `Pillow>=10.0.0` - обработка изображений (обложки)
-- `yt-dlp[default,curl-cffi]` - актуальный extractor и JS challenge scripts
+- `yt-dlp[default,curl-cffi]>=2026.8.19` - актуальный extractor, клиенты YouTube и JS challenge scripts
 - `bgutil-ytdlp-pot-provider` - подключение динамического YouTube PO-token provider
 - `python-dotenv>=1.0.0` - работа с .env файлами
 
