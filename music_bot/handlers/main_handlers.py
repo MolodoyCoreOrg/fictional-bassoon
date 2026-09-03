@@ -1374,6 +1374,31 @@ async def process_extract_format_selection(callback: CallbackQuery, state: FSMCo
 
 # --- 4. НАЛОЖЕНИЕ КАСТОМНОЙ ОБЛОЖКИ ---
 
+SUPPORTED_MP3_MIME_TYPES = {
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/x-mp3",
+    "audio/mpeg3",
+    "audio/x-mpeg-3",
+}
+
+
+def _get_custom_mp3_upload(message: Message):
+    """Возвращает MP3, отправленный как audio или как document."""
+    if message.audio:
+        return message.audio
+
+    document = message.document
+    if not document:
+        return None
+
+    file_name = (document.file_name or "").lower()
+    mime_type = (document.mime_type or "").partition(";")[0].strip().lower()
+    if file_name.endswith(".mp3") or mime_type in SUPPORTED_MP3_MIME_TYPES:
+        return document
+    return None
+
+
 @router.callback_query(F.data == "upload_cover")
 async def process_upload_cover(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -1382,8 +1407,22 @@ async def process_upload_cover(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_audio_file)
 
-@router.message(StateFilter(MediaStates.waiting_for_audio_file), F.audio)
+@router.message(
+    StateFilter(MediaStates.waiting_for_audio_file),
+    F.audio | F.document,
+)
 async def handle_custom_audio(message: Message, state: FSMContext):
+    audio = _get_custom_mp3_upload(message)
+    if not audio:
+        await send_media_error(
+            message,
+            None,
+            "audio",
+            "❌ Отправьте файл в формате MP3.",
+            reply_markup=get_back_keyboard(),
+        )
+        return
+
     user_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4()))
     status_msg = await send_media_progress(
         message,
@@ -1394,9 +1433,9 @@ async def handle_custom_audio(message: Message, state: FSMContext):
         os.makedirs(user_temp_dir, exist_ok=True)
         audio_path = os.path.join(
             user_temp_dir,
-            f"{message.audio.file_unique_id}.mp3",
+            f"{audio.file_unique_id}.mp3",
         )
-        file = await message.bot.get_file(message.audio.file_id)
+        file = await message.bot.get_file(audio.file_id)
         await message.bot.download_file(file.file_path, audio_path)
 
         await state.update_data(audio_path=audio_path, temp_dir=user_temp_dir)
