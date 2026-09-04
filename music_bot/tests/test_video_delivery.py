@@ -100,6 +100,10 @@ class TelegramVideoDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(main_handlers, "FFMPEG_EXECUTABLE", "ffmpeg"),
             patch.object(main_handlers, "TEMP_DIR", "temp"),
+            patch(
+                "handlers.main_handlers.download_telegram_file",
+                new=AsyncMock(),
+            ) as download_telegram_file,
             patch("handlers.main_handlers.os.makedirs"),
             patch("handlers.main_handlers.os.path.exists", return_value=True),
             patch(

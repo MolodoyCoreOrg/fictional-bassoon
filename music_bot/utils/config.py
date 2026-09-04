@@ -76,6 +76,19 @@ TELEGRAM_UPLOAD_TIMEOUT_SECONDS = int(
 if TELEGRAM_UPLOAD_TIMEOUT_SECONDS < 60 or TELEGRAM_UPLOAD_TIMEOUT_SECONDS > 86400:
     raise ValueError("TELEGRAM_UPLOAD_TIMEOUT_SECONDS должен быть в диапазоне 60..86400")
 
+# Download timeout is separate from sendVideo/sendAudio timeouts.
+TELEGRAM_DOWNLOAD_TIMEOUT_SECONDS = int(
+    os.getenv("TELEGRAM_DOWNLOAD_TIMEOUT_SECONDS", "").strip() or "300"
+)
+if not 30 <= TELEGRAM_DOWNLOAD_TIMEOUT_SECONDS <= 86400:
+    raise ValueError("TELEGRAM_DOWNLOAD_TIMEOUT_SECONDS должен быть в диапазоне 30..86400")
+
+# Optional mapping for the Bot API cache mounted at a different path in the bot.
+TELEGRAM_API_FILE_ROOT = os.getenv("TELEGRAM_API_FILE_ROOT", "").strip()
+TELEGRAM_BOT_FILE_ROOT = os.getenv("TELEGRAM_BOT_FILE_ROOT", "").strip()
+if bool(TELEGRAM_API_FILE_ROOT) != bool(TELEGRAM_BOT_FILE_ROOT):
+    raise ValueError("Задайте вместе TELEGRAM_API_FILE_ROOT и TELEGRAM_BOT_FILE_ROOT")
+
 
 def _find_cookies_file() -> str | None:
     """Ищет cookies-файл независимо от текущей рабочей директории."""

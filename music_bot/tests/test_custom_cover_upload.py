@@ -79,6 +79,10 @@ class CustomCoverUploadTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main_handlers, "TEMP_DIR", "temp"),
+            patch(
+                "handlers.main_handlers.download_telegram_file",
+                new=AsyncMock(),
+            ) as download_telegram_file,
             patch("handlers.main_handlers.os.makedirs"),
             patch(
                 "handlers.main_handlers.send_media_progress",
@@ -95,11 +99,13 @@ class CustomCoverUploadTests(unittest.IsolatedAsyncioTestCase):
         ):
             await main_handlers.handle_custom_audio(message, state)
 
-        bot.get_file.assert_awaited_once_with("telegram-file")
-        download_args = bot.download_file.await_args.args
-        self.assertEqual(download_args[0], "telegram/track.mp3")
+        download_telegram_file.assert_awaited_once()
+        download_args = download_telegram_file.await_args.args
+        self.assertIs(download_args[0], bot)
+        self.assertEqual(download_args[1], "telegram-file")
 
         saved = state.update_data.await_args.kwargs
+        self.assertEqual(download_args[2], saved["audio_path"])
         self.assertEqual(
             saved["audio_path"],
             os.path.join(saved["temp_dir"], "upload-unique.mp3"),
