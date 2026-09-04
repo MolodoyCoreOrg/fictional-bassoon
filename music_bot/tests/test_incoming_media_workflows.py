@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import shutil
@@ -8,6 +7,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+from mutagen.mp3 import MP3
+from PIL import Image
 
 os.environ.setdefault("BOT_TOKEN", "test-token")
 
@@ -81,6 +83,47 @@ class IncomingMediaWorkflowTests(unittest.IsolatedAsyncioTestCase):
         main_handlers.send_media_error.assert_not_awaited()
         self.assertTrue(audio.exists())
         self.assertTrue(cover.exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is needed to create a real MP3")
+    async def test_real_mp3_cover_is_embedded_before_sending(self):
+        audio = self.root / "source.mp3"
+        subprocess.run([
+            shutil.which("ffmpeg"), "-y", "-nostdin", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3",
+            "-c:a", "libmp3lame", str(audio),
+        ], check=True, capture_output=True, timeout=30)
+        cover = self.root / "source.jpg"
+        Image.new("RGB", (640, 360), "red").save(cover)
+        self.incoming_file(audio)
+        self.message.audio = SimpleNamespace(file_id="audio", file_unique_id="track")
+        await main_handlers.handle_custom_audio(self.message, self.state)
+        self.incoming_file(cover)
+        self.message.photo = [SimpleNamespace(file_id="photo")]
+        await main_handlers.handle_custom_cover(self.message, self.state)
+        self.state_data.update(title="Test track", artist="Test artist")
+        sent_paths = []
+
+        async def inspect_sent_audio(**kwargs):
+            path = Path(kwargs["audio"].path)
+            sent_paths.append(path)
+            tags = MP3(path).tags
+            self.assertEqual(str(tags["TIT2"]), "Test track")
+            self.assertEqual(str(tags["TPE1"]), "Test artist")
+            self.assertEqual(len(tags.getall("APIC")), 1)
+            self.assertTrue(tags.getall("APIC")[0].data)
+            self.assertEqual(kwargs["request_timeout"], 420)
+            self.assertTrue(Path(kwargs["thumbnail"].path).exists())
+            return SimpleNamespace()
+
+        self.message.answer_audio = AsyncMock(side_effect=inspect_sent_audio)
+        with patch.object(main_handlers, "remember_audio_message", new=AsyncMock()):
+            await main_handlers.process_final_audio(self.message, self.state, user_id=123)
+        main_handlers.send_media_error.assert_not_awaited()
+        self.assertEqual(len(sent_paths), 1)
+        self.assertFalse(sent_paths[0].exists())
+        self.assertTrue(audio.exists())
+        self.assertTrue(cover.exists())
+        self.state.clear.assert_awaited_once()
 
     async def test_audio_download_failure_allows_retry_in_same_mode(self):
         with patch.object(main_handlers, "download_telegram_file", new=AsyncMock(

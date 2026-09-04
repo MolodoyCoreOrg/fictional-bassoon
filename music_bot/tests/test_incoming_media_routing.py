@@ -1,6 +1,7 @@
 import os
 import unittest
 
+from aiogram import Bot
 from aiogram.types import Message
 
 os.environ.setdefault("BOT_TOKEN", "test-token")
@@ -10,6 +11,10 @@ from models.states import MediaStates
 
 
 class IncomingMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.bot = Bot("123456:TEST_TOKEN")
+        self.addAsyncCleanup(self.bot.session.close)
+
     async def first_handler(self, payload, state):
         message = Message.model_validate({
             "message_id": 1,
@@ -21,7 +26,7 @@ class IncomingMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
         # Exercise the registered filters in dispatch order. Calling the upload
         # handler directly missed the earlier catch-all swallowing MP3 documents.
         for handler in main_handlers.router.message.handlers:
-            matched, _ = await handler.check(message, raw_state=state)
+            matched, _ = await handler.check(message, raw_state=state, bot=self.bot)
             if matched:
                 return handler.callback.__name__
         return None
