@@ -39,6 +39,7 @@ from utils.music_downloader import (
     is_soundcloud_collection_url,
 )
 from utils.audio_processor import add_cover_to_mp3, cleanup_temp_files
+from utils.telegram_files import TelegramDownloadError, download_telegram_file
 from utils.album_cache import get_album
 from utils.media_request_cache import get_media_request, save_media_request
 from utils.track_history import remember_audio_message
@@ -1101,9 +1102,10 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
         "⏳ Готовлю видео-кружочек...",
     )
 
+    stage = "download"
     try:
-        file = await message.bot.get_file(video.file_id)
-        await message.bot.download_file(file.file_path, input_path)
+        await download_telegram_file(message.bot, video.file_id, input_path)
+        stage = "convert"
 
         command = [
             FFMPEG_EXECUTABLE,
@@ -1139,24 +1141,32 @@ async def handle_video_note_upload(message: Message, state: FSMContext):
             logger.error("FFmpeg video note conversion failed: %s", error_text)
             raise RuntimeError("Не удалось преобразовать видео в формат кружочка.")
 
+        stage = "send"
         await message.answer_video_note(
-            video_note=FSInputFile(output_path),
+            video_note=_telegram_media_input(output_path),
             duration=video.duration,
             length=480,
+            request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
         )
         await close_media_status(status_msg)
+        await state.clear()
     except Exception as e:
-        logger.exception("Error creating video note: %s", e)
+        logger.exception("Error creating video note at stage %s", stage)
+        error_text = (
+            str(e) if isinstance(e, TelegramDownloadError) else {
+                "download": "❌ Не удалось сохранить видео из Telegram. Попробуйте отправить его ещё раз.",
+                "convert": "❌ Не удалось обработать видео. Попробуйте другой ролик или сообщите администратору бота.",
+                "send": "❌ Не удалось отправить готовый кружочек. Попробуйте ещё раз немного позже.",
+            }[stage]
+        )
         await send_media_error(
             message,
             status_msg,
             "circle",
-            "❌ Не удалось сделать кружочек из этого видео. "
-            "Проверьте, что ролик длится не более минуты, и попробуйте снова.",
+            error_text,
         )
     finally:
         await cleanup_temp_files(user_temp_dir)
-        await state.clear()
 
 
 @router.message(StateFilter(MediaStates.waiting_for_video_note))
@@ -1195,7 +1205,10 @@ async def handle_extract_link(message: Message, state: FSMContext):
     )
     await state.set_state(MediaStates.waiting_for_extract_format)
 
-@router.message(F.video | F.document)
+@router.message(
+    StateFilter(None, MediaStates.waiting_for_extract_link),
+    F.video | F.document,
+)
 async def handle_video_file_for_audio(message: Message, state: FSMContext):
     """Перехватывает видеофайлы для быстрого извлечения звука"""
     video_obj = message.video if message.video else message.document
@@ -1213,8 +1226,7 @@ async def handle_video_file_for_audio(message: Message, state: FSMContext):
     status_msg = await message.answer("⏳ Сохраняю ваше видео на сервере для извлечения аудио...")
     
     try:
-        file = await message.bot.get_file(video_obj.file_id)
-        await message.bot.download_file(file.file_path, video_path)
+        await download_telegram_file(message.bot, video_obj.file_id, video_path)
         
         title = "Аудио из видео"
         if getattr(video_obj, 'file_name', None):
@@ -1246,8 +1258,8 @@ async def handle_video_file_for_audio(message: Message, state: FSMContext):
             message,
             status_msg,
             "video",
-            "❌ Произошла ошибка при загрузке видеофайла из Telegram. "
-            "Попробуйте отправить видео меньшего размера или ссылку.",
+            str(e) if isinstance(e, TelegramDownloadError) else
+            "❌ Не удалось сохранить видео из Telegram. Попробуйте отправить его ещё раз.",
         )
         await cleanup_temp_files(user_temp_dir)
         await state.clear()
@@ -1435,8 +1447,7 @@ async def handle_custom_audio(message: Message, state: FSMContext):
             user_temp_dir,
             f"{audio.file_unique_id}.mp3",
         )
-        file = await message.bot.get_file(audio.file_id)
-        await message.bot.download_file(file.file_path, audio_path)
+        await download_telegram_file(message.bot, audio.file_id, audio_path)
 
         await state.update_data(audio_path=audio_path, temp_dir=user_temp_dir)
         await close_media_status(status_msg)
@@ -1451,11 +1462,13 @@ async def handle_custom_audio(message: Message, state: FSMContext):
             message,
             status_msg,
             "audio",
-            "❌ Не удалось загрузить аудиофайл. Попробуйте отправить файл ещё раз.",
+            str(error) if isinstance(error, TelegramDownloadError) else
+            "❌ Не удалось сохранить аудиофайл. Попробуйте отправить файл ещё раз.",
             reply_markup=get_back_keyboard(),
         )
         await cleanup_temp_files(user_temp_dir)
-        await state.clear()
+        await state.update_data(audio_path=None, temp_dir=None)
+        await state.set_state(MediaStates.waiting_for_audio_file)
 
 @router.message(StateFilter(MediaStates.waiting_for_cover), F.photo)
 async def handle_custom_cover(message: Message, state: FSMContext):
@@ -1472,8 +1485,7 @@ async def handle_custom_cover(message: Message, state: FSMContext):
 
         cover_path = os.path.join(user_temp_dir, "cover.jpg")
         photo = message.photo[-1]
-        file = await message.bot.get_file(photo.file_id)
-        await message.bot.download_file(file.file_path, cover_path)
+        await download_telegram_file(message.bot, photo.file_id, cover_path)
 
         await state.update_data(cover_path=cover_path)
         await close_media_status(status_msg)
@@ -1489,12 +1501,15 @@ async def handle_custom_cover(message: Message, state: FSMContext):
             message,
             status_msg,
             "audio",
-            "❌ Не удалось загрузить обложку. Начните обработку аудио заново.",
+            str(error) if isinstance(error, TelegramDownloadError) else
+            "❌ Не удалось загрузить обложку. Отправьте картинку ещё раз.",
             reply_markup=get_back_keyboard(),
         )
         if user_temp_dir:
-            await cleanup_temp_files(user_temp_dir)
-        await state.clear()
+            await state.update_data(cover_path=None)
+            await state.set_state(MediaStates.waiting_for_cover)
+        else:
+            await state.clear()
 
 @router.message(StateFilter(MediaStates.waiting_for_track_info), F.text)
 async def handle_custom_track_info(message: Message, state: FSMContext):
@@ -1556,7 +1571,7 @@ async def process_final_audio(
     
     try:
         processed_path = await add_cover_to_mp3(audio_path, cover_path, title, artist)
-        audio_file = FSInputFile(processed_path)
+        audio_file = _telegram_media_input(processed_path)
         thumb_file = FSInputFile(cover_path) if os.path.exists(cover_path) else None
         
         current_date = datetime.now().strftime("%d/%m/%Y")
@@ -1575,7 +1590,8 @@ async def process_final_audio(
         sent_audio = await message.answer_audio(
             audio=audio_file, title=title, performer=artist,
             caption=caption,
-            parse_mode="HTML", thumbnail=thumb_file
+            parse_mode="HTML", thumbnail=thumb_file,
+            request_timeout=TELEGRAM_UPLOAD_TIMEOUT_SECONDS,
         )
         history_user_id = user_id or message.from_user.id
         await remember_audio_message(history_user_id, sent_audio)
